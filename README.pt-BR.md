@@ -1,6 +1,6 @@
 # docker-termux — Docker num Android sem root
 
-> **O que dá e o que não dá, medido no aparelho:** [`CAPACIDADES.md`](CAPACIDADES.md) —
+> **O que dá e o que não dá, medido no aparelho:** [`CAPACIDADES.md`](CAPACIDADES.pt-BR.md) —
 > capacidades verificadas, limites com causa raiz, o que é teoricamente possível e o
 > que já existia antes (créditos).
 
@@ -49,7 +49,7 @@ O que segue é o registro de como o `docker` foi feito funcionar aqui — inclus
 cinco defeitos do Android que precisaram de conserto e os que **não têm** conserto.
 Medido num Galaxy S24 Ultra (Android 16, arm64, kernel 6.1.145), tudo digitado e
 executado dentro do Termux. O que já existia antes está creditado em
-[`AUTHORS.md`](AUTHORS.md) — e o que é contribuição original deste repositório,
+[`AUTHORS.md`](AUTHORS.pt-BR.md) — e o que é contribuição original deste repositório,
 também.
 
 ---
@@ -360,11 +360,11 @@ quando o HTML já traz o conteúdo, e nunca rode dois Chromiums em paralelo.
 Feito por **Gabriel Padilha** ([@Padilha-BR](https://github.com/Padilha-BR)), do
 trabalho de campo às correções — tudo executado dentro do aparelho, por terminal.
 
-- [`AUTHORS.md`](AUTHORS.md) — o que já existia antes (créditos) e o que é
+- [`AUTHORS.md`](AUTHORS.pt-BR.md) — o que já existia antes (créditos) e o que é
   contribuição original deste repositório.
 - [`CITATION.cff`](CITATION.cff) — citação formal (o GitHub mostra o botão
   *Cite this repository*).
-- [`CAPACIDADES.md`](CAPACIDADES.md) — o que pode, o que não pode e o que é
+- [`CAPACIDADES.md`](CAPACIDADES.pt-BR.md) — o que pode, o que não pode e o que é
   teoricamente possível, com as medições.
 
 ### Estrutura
