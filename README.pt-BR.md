@@ -39,7 +39,7 @@ ou de clique: cada subida custa ~1 GB de RAM contra 34 MB do nível 1.
 | **`webcdp`** | nível 3 — CDP puro (**sem Selenium**): texto, JS, screenshot |
 | **`webplay`** | nível 3b — Selenium + chromedriver, para quem quer a API familiar |
 | **`pdf` / `pdfpy`** | Markdown → PDF tipografado; helpers de PDF em container |
-| **`verificar.sh`** | **a prova**: 16 itens, 0 falha, ~1 min, só leitura |
+| **`verificar.sh`** | **a prova**: 16 itens, ~2 min; muda estado (daemon, imagens, containers) |
 
 ---
 
@@ -381,7 +381,7 @@ trabalho de campo às correções — tudo executado dentro do aparelho, por ter
 
 | caminho | o que é |
 |---|---|
-| `verificar.sh` | **a bateria que prova o stack inteiro** (16 itens, ~1 min, não altera nada) |
+| `verificar.sh` | **a bateria que prova o stack inteiro** (16 itens, ~2 min; sobe o daemon, baixa imagens e roda containers) |
 | `scripts/` | o dispatcher `docker`, o motor direto, o ciclo do daemon e o instalador |
 | `ferramentas/` | `pdf`, `pdfpy`, `webget`, `webprint`, `webcdp`, `webplay` e o helper `webauto.py` |
 | `imagens/` | Dockerfiles **e as fontes autorais** (`md2pdf`, `webget.py`, `webprint.py`) |
