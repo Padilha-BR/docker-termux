@@ -130,6 +130,32 @@ isolamento de rede de verdade.
 
 ---
 
+## 3.5 E se você usar **só o udocker oficial**? (medido em 15/10/2026)
+
+O udocker virou pacote oficial do Termux (`pkg install udocker`, 1.3.17-5,
+`Depends: curl, proot, python, resolv-conf`). Rodei nele a mesma bateria que
+revelou os defeitos deste repositório:
+
+| Defeito | No udocker **oficial** |
+|---|---|
+| proot 4.8.0 não rastreia filhos (SIGSYS em `apk`/`pip`) | ✅ **resolvido** — o pacote depende do `proot` do Termux (5.1) |
+| hardlink negado no rootfs | ✅ **resolvido** — o `link2symlink` já vem tratado |
+| container sem DNS | ✅ **resolvido** — dependência `resolv-conf` injeta os nameservers |
+| `LD_PRELOAD` do termux-exec quebrando o proot | ✅ **resolvido** |
+| `-v origem:destino` (volume simples) | ✅ funciona igual |
+| **`-v origem:destino:ro`** | ❌ **mesmo defeito**: cria um caminho literal `/destino:ro` e o mount não acontece |
+| `--platform=linux/amd64` no `run` | ❌ ignora a plataforma: devolveu `aarch64` |
+| `build`, `exec`, `logs` | ❌ **não existem** — o subconjunto é `pull/create/run/ps/rm/rmi/tag/import/export/save/inspect/setup/...` |
+
+**Conclusão honesta:** se você só quer **executar** imagens, `pkg install udocker`
+resolve — e resolve sozinho três dos cinco defeitos que este repositório documenta
+(a caçada aqui só foi necessária porque partimos de um tarball próprio). O que o
+udocker puro **não** dá é `docker build`, `docker exec`, `docker logs` e a API do
+Docker — é exatamente isso que a camada daemon deste repositório acrescenta, e é
+ela que traz os três defeitos do `udockerd` que o dispatcher contorna.
+
+---
+
 ## 4. O que já existia antes (crédito — nada disto é invenção nossa)
 
 Este trabalho **não inventou** o conceito. O que ele faz é integrar, corrigir e medir:

@@ -95,7 +95,7 @@ imagem Docker, chamadas como comandos normais:
 | `pdfpy` | roda qualquer helper da skill `pdf` (pypdf/reportlab/pdfplumber) | `pdf-tool:1` |
 | `webget` | baixa página e extrai texto/HTML/links (**nível 1**, sem navegador) | `web:1` |
 | `webprint` | Chromium headless **nativo** (fora do container): `--dom` / `--texto` / `--pdf` / `--png` (**nível 2**) | — (usa `chromium-browser`) |
-| `webplay` | roda **seu** script Playwright (**nível 3**) | `navegador:1` |
+| `webplay` | roda **seu** script de automação — **Selenium + chromedriver nativo**, com o helper `webauto.py` (**nível 3**) | — (usa o `chromium` do Termux) |
 
 Fontes em `~/docker-termux/imagens/<nome>/`; cópia publicada em
 `github.com/Padilha-BR/docker-termux`. Cada comando constrói a imagem na primeira
@@ -107,7 +107,7 @@ execução (avisa).
 |---|---|---|---|---|
 | 1 | `webget` (httpx + bs4/lxml, container) | HTML já traz o conteúdo (notícia, blog, doc, wiki) — **comece aqui** | 4,3 s, ~34 MB | **OK** |
 | 2 | `webprint` (Chromium **nativo**, sem container) | página precisa de JS, ninguém precisa clicar | 2,9 s (estática) / 4,7 s (SPA) | **OK (medido)** |
-| 3 | `webplay` (Playwright) | login, formulário, esperar seletor, várias abas | ver seção abaixo | nativo via `executable_path` |
+| 3 | `webplay` (Selenium + chromedriver nativo) | login, formulário, esperar seletor, várias abas | 4,0-4,8 s, ~1 GB | **OK (medido)** |
 
 **Nenhum Chromium sobrevive ao `proot`** (medido: Chrome for Testing 156 e
 `chrome-headless-shell` 156, arm64 nativos). Sintomas: `Trace/breakpoint trap`
@@ -128,7 +128,8 @@ ptrace/processos filhos — os dois brigam.
 
 Medido (arm64, Android 16): estática **2,9 s**, SPA `react.dev` **4,7 s** (o JS
 roda e o texto sai renderizado), `--screenshot` PNG 3,1 s, `--print-to-pdf` 88 KB.
-É mais rápido que o mesmo fetch pelo `webget` dentro do container (7 s).
+O mesmo fetch pelo `webget` dentro do container variou de 4 a 9 s (cada chamada sobe o proot
+de novo), então o headless nativo ganha em tempo — mas perde feio em RAM.
 Os erros de `dbus`/`udev` no stderr são inofensivos (Android não tem bus).
 
 **Nível 3 = Selenium, não Playwright**: o Playwright não tem wheel para Android
@@ -186,10 +187,28 @@ do zero (5-20 min). Por isso o código que muda com frequência (ex.: `md2pdf`,
 copiado na imagem — editar o script não exige rebuild.
 - **Nunca reconstrua imagem com containers rodando**, e não reinicie o daemon
 durante um build.
-- Imagens pesadas: `navegador:1` ~2 GB, `pdf-tool:1` ~400 MB, `web:1` ~200 MB.
-Confira espaço antes (`df -h ~`).
+- Imagens pesadas: `manim-celular:1` ~1,5 GB, `pdf-tool:1` ~718 MB, `web:1` ~86 MB.
+Confira espaço antes (`df -h ~`). **Não reconstrua a imagem de navegador:** nenhum wrapper a
+usa (Chromium não roda sob proot) e ~1,5 GB só para isso não se paga — o headless é nativo. As
+imagens não podem diferir por *tag* apenas: uma imagem por arquitetura, ver acima.
 - **Nunca `pkill -f udockerd`**: a própria linha de comando casa com o padrão e
   mata a sua shell (e o daemon). Use o pidfile: `docker daemon down`.
+- **Contêiner morto à força deixa o rootfs inteiro para trás.** Quando o processo
+  é encerrado com SIGKILL (um `timeout` estourando, um Chromium travado), o `--rm`
+  nunca roda e o diretório do contêiner fica com uma **cópia completa da imagem**.
+  Medido no aparelho: 8 × `navegador:1` + 1 × `ubuntu:24.04` = **10,6 GB** parados
+  sem ninguém usando. Confira com
+  `~/docker-termux/udocker-1.3.17/udocker/udocker ps` (`W` na coluna de estado =
+  parado; PID vazio = não está rodando) e limpe com `udocker rm <id>` — nunca um
+  que apareça rodando. Depois da limpeza o motor segue normal (o rootfs é
+  recriado da imagem): confirme com `docker-direct run --rm alpine echo ok`.
+- **Matar o wrapper não mata os filhos.** Encerrar um `benchmark.sh` (ou qualquer
+  script que chame o motor) deixa o `udocker run`, o `proot` e **toda a árvore do
+  Chromium** vivos, agora órfãos com `PPid 1` — ~150 MB deitados sem ninguém
+  usando (medido: 152 MB). Pior: um `pkill -f udocker` os pegaria e levaria o
+  daemon junto. Limpe **por PID explícito**, conferindo antes a árvore
+  (`/proc/<pid>/stat` campo PPid) e preservando o `udockerd` e o `hermes
+  dashboard`. Rode `docker run` sempre com `--rm` para não acumular.
 - **Não reinicie o daemon com build rodando.** `docker daemon down` mata o grupo
   de processos e leva os containers junto — um `docker build` em andamento morre
   com `proot info: vpid 1: terminated with signal 15` e o Dockerfile segue com
@@ -202,6 +221,33 @@ Confira espaço antes (`df -h ~`).
 - Alternativas quando o pedido é "uma distro Linux no celular": `proot-distro`
   (mantido pelo Termux: pull OCI, `build` de Dockerfile, `push`, cross-arch) —
   na prática faz mais que a camada daemon para esse caso de uso.
+
+## Antes de dizer "isso é novo" — prior art e alternativas
+
+`references/prior-art-e-alternativas.md` reúne o que já existe publicado para containers no
+Android (udocker empacotado no APT do Termux, `Termux-Udocker`, `udockerd`, `cdriv`, `proot-distro`,
+e os caminhos QEMU/root para Docker **de kernel**) e o que cada um resolve. Leia antes de reivindicar
+ineditismo, antes de escolher caminho e antes de publicar — o usuário exige a seção "o que já
+existia antes", e checar prior art converte "sou o primeiro" (frágil) em "não achei publicado"
+(verificável).
+
+Para medir o custo real de qualquer comando no aparelho (tempo + pico de RAM por amostragem de
+`/proc`): `scripts/medir-custo.py "<rótulo>" <comando>`. Foi o instrumento que produziu a tabela
+headless acima — os ~1 GB do Chromium nativo surpreendem e vale reconferir em aparelho novo.
+
+## Antes de instalar por tarball: o pacote oficial já resolve metade
+
+`pkg install udocker` (1.3.17-5, `Depends: curl, proot, python, resolv-conf`) já
+traz **proot do Termux 5.1, o `link2symlink` e o DNS** — ou seja, os defeitos 1, 2,
+3 e 5 desta skill **não existem** nessa via (medido: `sh -c "uname -m"`, `apk add`,
+`wget example.com` todos OK). A caçada descrita abaixo só é necessária para quem
+parte de tarball próprio, ou para quem precisa da camada daemon.
+
+O udocker puro **não** tem `build`, `exec` nem `logs` (subconjunto real:
+`pull create run images ps rm rmi tag import export save inspect verify setup login
+logout`) — isso é o que a camada daemon deste repositório acrescenta. E o defeito do
+sufixo `:ro` **continua** no pacote oficial (verificado: cria `/destino:ro` e não
+monta), então esse é um bug legítimo a reportar upstream.
 
 ## Verificação obrigatória
 
