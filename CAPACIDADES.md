@@ -147,6 +147,27 @@ revelou os defeitos deste repositório:
 | `--platform=linux/amd64` no `run` | ❌ ignora a plataforma: devolveu `aarch64` |
 | `build`, `exec`, `logs` | ❌ **não existem** — o subconjunto é `pull/create/run/ps/rm/rmi/tag/import/export/save/inspect/setup/...` |
 
+### 3.5.1 "Então o do repo faz tudo que o udocker faz?" — **não**
+
+São **interfaces diferentes sobre o mesmo motor**, não um superconjunto. O comando
+`docker` deste repositório passa quase tudo para a **CLI oficial do Docker**, que
+fala a API do daemon; os dois compartilham o mesmo `~/.udocker`, então as imagens
+servem para ambos (e o `udocker` oficial pode ficar instalado junto).
+
+| Exclusivo do **udocker** | passa pelo `docker` do repo? |
+|---|---|
+| `verify`, `protect`, `unprotect`, `mkrepo`, `setup` | ❌ não existem na CLI do Docker |
+| `name`, `rmname`, `clone` (nomeação de container) | ❌ idem |
+| `create`, `run`, `pull`, `images`, `ps`, `rm`, `rmi`, `tag`, `save`, `export`, `import`, `inspect`, `login`, `logout` | ✅ cobertos (via API do Docker) |
+
+| Exclusivo do **`docker`** (o do repo) | existe no udocker? |
+|---|---|
+| `build`, `exec`, `logs` | ❌ não existem no udocker |
+| `cp`, `commit`, `diff`, `events`, `stats`, `top`, `wait`, `attach` | ❌ idem (dependem da API do daemon) |
+
+Some-se que a CLI lista uns 45 comandos, mas **só os que o daemon implementa
+funcionam de fato** — o resto existe na ajuda e falha na execução.
+
 **Conclusão honesta:** se você só quer **executar** imagens, `pkg install udocker`
 resolve — e resolve sozinho três dos cinco defeitos que este repositório documenta
 (a caçada aqui só foi necessária porque partimos de um tarball próprio). O que o
