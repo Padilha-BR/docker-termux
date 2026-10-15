@@ -1,0 +1,324 @@
+# docker-termux — Docker num Android sem root
+
+> **English version below (scroll down).**
+
+Relato de campo: como fazer `docker` funcionar num celular Android sem root, sem
+daemon de kernel, sem cgroups e sem user namespaces — medido num Galaxy S24 Ultra
+(Android 16, arm64, kernel 6.1.145), tudo digitado e executado dentro do Termux.
+
+---
+
+## Primeiro, o que isto NÃO é
+
+**Docker de verdade é impossível sem root.** Medido, não suposto:
+
+```
+$ unshare -U true
+unshare: unshare failed: Invalid argument
+```
+
+O Android bloqueia *user namespaces* para aplicativos. Sem isso não existe
+daemon, cgroup isolado, overlayfs nem rede própria. `/proc/filesystems` e
+`/sys/fs/cgroup` respondem `Permission denied`. Quem promete "Docker completo no
+Termux sem root" está vendendo outra coisa.
+
+**O que este repositório entrega:** duas camadas que, juntas, dão a experiência
+do Docker na parte que importa (`pull`, `run`, `build`, `exec`, `logs`, `ps`,
+`rm`, TTY, imagens de outra arquitetura por emulação) usando execução em
+userspace com `proot`.
+
+---
+
+## O que já existia antes (créditos)
+
+Este trabalho **não** inventou containers rootless no Android. Apoia-se em
+projetos que já resolviam partes do problema:
+
+| Projeto | O que já fazia |
+|---|---|
+| [udocker](https://github.com/indigo-dc/udocker) | Fala com o Docker Hub, baixa camadas OCI, monta rootfs, executa com proot/fakechroot — sem root |
+| [udockerd](https://pypi.org/project/udockerd/) | Daemon compatível com a **API do Docker** sobre udocker, feito para Termux; cobre create/start/stop/exec/logs/TTY e `docker build`; já traz `--dns` e recomenda o `proot` oficial do Termux |
+| [proot-distro](https://github.com/termux/proot-distro) | Já puxa imagens OCI do Docker Hub/GHCR/quay, faz `build` de Dockerfile sem daemon, `push`, cross-arch por qemu — e usa `--link2symlink` e o bind de `/linkerconfig/com.android.art/ld.config.txt` |
+| [termux/proot](https://github.com/termux/proot) (issues [#75](https://github.com/termux/proot/issues/75), [#149](https://github.com/termux/proot/issues/149)) | Já documentavam `link()` negado por SELinux, `PROOT_NO_SECCOMP=1` e a whitelist de syscalls do bionic |
+| [termux/termux-app#837](https://github.com/termux/termux-app/issues/837) | Explica que hardlink é bloqueado por hardening do SELinux e que `--link2symlink` é a saída |
+
+Toda a base é deles. O que **este** repositório acrescenta, até onde
+verificamos e não encontramos publicado:
+
+1. O **diagnóstico medido** de por que o caminho `udocker` (que baixa seu
+   próprio proot 4.8.0, o `udockertools`) quebra no Android: qualquer
+   `fork+exec` dentro do container morre com **SIGSYS (signal 31)**, enquanto
+   `exec` direto funciona. Isso derruba `apk`, `apt-get`, `pip` e qualquer script.
+2. A **correção mínima** para isso: um *shim* de um arquivo que aponta o udocker
+   para o `proot` 5.1 do Termux, com `--link2symlink`.
+3. Os outros três defeitos de ambiente e suas correções (`resolv.conf`
+   inexistente no Android, `qemu` não encontrado, ruído do linker do Android em
+   imagens amd64), com os sintomas e os comandos que os comprovam.
+4. Um instalador idempotente que monta as **duas** camadas (modo direto e
+   daemon) e um `docker doctor` que confere cada peça.
+
+Se você só quer containers no Termux, **use o `proot-distro`** — é mantido pelo
+time do Termux e faz mais. Este repositório existe para o caso de você querer a
+API/CLI do Docker (`docker build`, `docker exec`, `docker logs`) e para
+documentar as armadilhas com medições reproduzíveis.
+
+---
+
+## Arquitetura
+
+```
+                        comando `docker` (seu)
+                                |
+                    [ dispatcher: .hermes/bin/docker ]
+                       |                          |
+        daemon no ar?  |                          | daemon não sobe
+                       v                          v
+   CAMADA 2: daemon (API do Docker)        CAMADA 1: modo direto
+   CLI oficial estatica (arm64)            udocker + proot 5.1 na hora
+   <-> udockerd 0.3.5 (tcp 127.0.0.1:2375) sem build/exec/logs
+   -> execucao real: proot 5.1 do Termux
+```
+
+- **Camada 1 (modo direto):** `udocker` + `proot` do Termux, sem daemon, sem pip.
+  Roda container, tem DNS, volumes, `-d`/`logs` próprios. `docker-direct`.
+- **Camada 2 (daemon):** `udockerd` expõe a API do Docker e a CLI oficial do
+  Docker (binário estático arm64) fala com ele. Habilita `docker build`,
+  `docker exec`, `docker logs`, TTY e qualquer cliente de API.
+
+Ambas executam de verdade via **proot 5.1 do Termux** — nenhuma tem namespaces
+de kernel.
+
+---
+
+## Instalação
+
+```sh
+git clone https://github.com/Padilha-BR/docker-termux
+cd docker-termux
+bash docker-termux-setup          # idempotente; --force refaz downloads
+docker doctor                     # confere cada peça
+```
+
+O instalador cuida de: `proot`, `qemu-user-x86-64`, runtime udocker, shim do
+proot, patch do qemu, venv do udockerd, compilação do supervisor, download da CLI
+oficial, scripts, atalhos e `resolv.conf`.
+
+---
+
+## Uso
+
+```sh
+docker pull alpine                       # imagem arm64 (nativa, rápida)
+docker pull --platform=linux/amd64 alpine  # imagem x86 (emulada por qemu)
+docker run --rm alpine sh -c "uname -m; apk add --no-cache curl && curl -s example.com"
+docker run -it --rm debian:bookworm-slim bash
+
+docker run -d --name=web -v $HOME/site:/site python:3.12-alpine sh /site/serve.sh
+docker logs web
+docker exec web cat /etc/alpine-release
+docker stop web && docker rm web
+
+printf 'FROM alpine:3.20\nRUN apk add --no-cache jq\nCMD ["jq","--version"]\n' > Dockerfile
+docker build -t minha-imagem .           # build de verdade, sem daemon
+docker run --rm minha-imagem
+
+docker doctor        # diagnóstico
+docker daemon up     # sobe/derruba o daemon explicitamente
+docker-direct ...    # força o modo sem daemon (sempre disponível)
+```
+
+---
+
+## Os cinco defeitos do Android (e as correções)
+
+Todos encontrados por medição (`proot -v 9`, bisseção de variáveis de ambiente,
+trace de syscall), não por chute.
+
+### 1. O proot que o udocker baixa não rastreia processos filhos
+
+```sh
+$ udocker run alpine sh -c "uname -m"     # exit 255
+proot info: vpid 1: terminated with signal 31
+$ udocker run alpine uname -m             # funciona: aarch64
+```
+
+Regra que resume o sintoma: **builtin do shell passa, applet externo morre.**
+`echo` e `pwd` funcionam; `uname`, `cat`, `apk`, `apt`, `pip` — qualquer coisa que
+faça `fork+exec` — morre com SIGSYS. O proot do udocker é o `udockertools-v1.1.4`
+(proot 4.8.0); o do Termux é 5.1.107, com as correções de seccomp/arm.
+
+**Correção:** um shim em `~/.udocker/bin/proot-arm64-4_8_0` (o udocker executa
+esse caminho) que delega ao proot do Termux, mantendo as flags que o udocker usa
+(`--kill-on-exit`, `-b`, `-0`, `-k/--kernel-release`, `-r`, `-w`, `-v`):
+
+```sh
+exec /data/data/com.termux/files/usr/bin/proot --link2symlink "$@"
+```
+
+### 2. O Android nega hardlink dentro do rootfs
+
+```sh
+$ apk update
+WARNING: updating and opening https://...: Permission denied
+$ apk add --no-cache curl
+(9/9) Installing curl
+ERROR: System state may be inconsistent: failed to write database: Permission denied
+```
+
+Os pacotes instalam, mas o apk não consegue gravar o banco — porque `link()` é
+negado pelo SELinux para aplicativos comuns (a issue #837 do termux-app documenta
+isso). **Correção:** `--link2symlink` (a mesma flag que o proot-distro usa).
+Depois: `OK: 28554 distinct packages available`.
+
+### 3. O Android não tem `/etc/resolv.conf`
+
+O container sobe sem DNS: `wget: bad address 'example.com'`. A opção `--dns=`
+do udocker não basta. **Correção:** escrever
+`nameserver 8.8.8.8` em `~/.udocker/containers/<ctr>/ROOT/etc/resolv.conf`
+(o CLI faz isso automaticamente; `docker dns-fix` conserta os antigos).
+Depois: `HTTP 200`.
+
+### 4. Imagem amd64 não encontra o qemu
+
+```
+Warning: qemu required but not available
+proot info: vpid 1: terminated with signal 7      # SIGBUS
+```
+
+O udocker passa apenas o **nome** do binário (`-q qemu-x86_64`) e o proot procura
+no `$PATH` do *container*, que não tem qemu. **Correção:** patch de uma linha em
+`udocker/engine/proot.py` (`self._get_qemu(return_path=True)`) + `pkg install
+qemu-user-x86-64`. Depois: `uname -m` → `x86_64` em **1,6 s**.
+
+### 5. O `LD_PRELOAD` do termux-exec quebra qualquer proot
+
+```
+proot error: execve("/bin/busybox"): No such file or directory
+```
+
+…com o `/bin/busybox` presente e executável. O Termux injeta
+`libtermux-exec-ld-preload.so` em todo comando; o loader do container tenta
+carregar essa biblioteca e falha. Foi isolado por bisseção — é a única variável
+do ambiente que mata o processo. **Correção:** remover `LD_PRELOAD` (e
+`LD_LIBRARY_PATH`) antes de chamar o motor.
+
+### Bônus: ruído do linker
+
+Imagem amd64 imprime `WARNING: linker: failed to find ... /linkerconfig/ld.config.txt`
+a cada processo (o qemu é um binário Android rodando sob o proot).
+**Correção:** bind `-v /linkerconfig:/linkerconfig` — `/linkerconfig` é legível
+pelo Termux (o proot-distro faz o mesmo com o caminho do ART).
+
+---
+
+## Verificação (reproduza)
+
+```sh
+docker doctor
+docker run --rm alpine sh -c "uname -m; apk add --no-cache curl >/dev/null && echo apk-ok"
+docker run --rm debian:bookworm-slim sh -c "apt-get update -qq >/dev/null && echo apt-ok"
+docker run --rm python:3.12-alpine sh -c "pip install -q requests && echo pip-ok"
+docker run -it --rm alpine sh
+```
+
+O teste que pega o defeito 1 é `sh -c` executando applet **externo** (`uname -m`),
+não `echo` (builtin). O que pega o defeito 2 é `apk add`/`apt-get install`.
+
+Medições desta máquina: `docker build` de um Dockerfile com `apk add jq` em
+**13,8 s**; `proot-distro build` equivalente em 3,4 s (3 layers, 4,4 MiB);
+imagem amd64 executando em **1,6 s**; ~370 MB de imagens em disco após os testes.
+
+---
+
+## Limitações honestas
+
+- `docker compose`, `docker network`, `docker volume` (como objetos), `swarm`,
+  BuildKit, healthcheck, restart policy, `--memory/--cpus` e `docker push` não
+  existem neste modo.
+- **Rede não é isolada:** o container usa a pilha de rede do Termux, então o
+  serviço já escuta direto na porta (o `-p` é ignorado de propósito).
+- O daemon `udockerd` 0.3.5 só captura a saída do container principal quando ele
+  tem TTY; o dispatcher insere `-t` automaticamente em `run -d` e avisa.
+- `docker run` sem `--rm` acumula containers parados (igual ao Docker real).
+- O Android suspende processos em segundo plano: para serviços longos, garanta a
+  bateria sem restrições para o Termux e mantenha wake-lock.
+- Uma arquitetura por tag: `pull --platform=linux/amd64 alpine:latest` substitui
+  a imagem arm64 local daquela tag.
+
+---
+
+## Licença
+
+MIT. Os componentes usados mantêm suas licenças: udocker (GPL-2.0),
+udockerd (Apache-2.0), proot/proot-distro (GPL-2.0), Docker CLI (Apache-2.0),
+qemu (GPL-2.0).
+
+---
+---
+
+# docker-termux — Docker on Android without root
+
+> Field report: getting `docker` to work on an Android phone without root, no
+> kernel daemon, no cgroups, no user namespaces — measured on a Galaxy S24 Ultra
+> (Android 16, arm64, kernel 6.1.145), all typed and executed inside Termux.
+
+## What this is NOT
+
+**Real Docker is impossible without root.** Measured, not assumed:
+
+```
+$ unshare -U true
+unshare: unshare failed: Invalid argument
+```
+
+Android blocks user namespaces for apps. No user namespaces means no daemon, no
+isolated cgroups, no overlayfs, no private network. `/proc/filesystems` and
+`/sys/fs/cgroup` are `Permission denied`. Anyone promising "full Docker on Termux
+without root" is selling something else.
+
+**What you get here:** two layers that together deliver the Docker experience
+where it matters (`pull`, `run`, `build`, `exec`, `logs`, `ps`, `rm`, TTY,
+cross-architecture images through emulation) using userspace execution with
+`proot`.
+
+## Prior art (credit)
+
+This work did **not** invent rootless containers on Android. It stands on
+projects that had already solved parts of it: **udocker** (OCI pull + rootfs),
+**udockerd** (a Docker-Engine-API-compatible daemon over udocker, built for
+Termux, with `docker build`, `--dns`, and a recommendation to use Termux's own
+`proot`), **proot-distro** (OCI pulls, Dockerfile builds without a daemon, qemu,
+`--link2symlink`, and the `/linkerconfig` bind), and the **termux/proot** and
+**termux-app** issues documenting SELinux blocking `link()` and the bionic
+syscall whitelist.
+
+Until we found otherwise unpublished, what this repository adds is:
+
+1. The **measured diagnosis** of why the `udocker` path (which downloads its own
+   proot 4.8.0) breaks on Android: every `fork+exec` inside the container dies
+   with **SIGSYS (signal 31)** while a direct `exec` works — which kills `apk`,
+   `apt-get`, `pip` and any script.
+2. The **one-file fix**: a shim pointing udocker at Termux's `proot` 5.1 with
+   `--link2symlink`.
+3. Three further environment defects and their fixes (`/etc/resolv.conf` missing
+   on Android, qemu not found for amd64 images, Android linker noise), each with
+   the symptom and the command that proves it.
+4. An idempotent installer for **both** layers plus a `docker doctor`.
+
+If you just want Linux containers on Termux, **use `proot-distro`** — it is
+maintained by the Termux team and does more. This repository exists for the case
+where you want the Docker CLI/API (`docker build`, `exec`, `logs`) and for the
+reproducible write-up of the pitfalls.
+
+## Install / usage
+
+```sh
+git clone https://github.com/Padilha-BR/docker-termux && cd docker-termux
+bash docker-termux-setup
+docker doctor
+docker run --rm alpine sh -c "uname -m; apk add --no-cache curl && curl -s example.com"
+docker build -t minha-imagem .     # real build, no daemon
+```
+
+See the Portuguese section above for the full defect list, verification commands
+and limitations — the two sections describe the same thing.

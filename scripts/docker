@@ -1,0 +1,85 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# docker — no Termux/Android, sem root e sem daemon de kernel.
+#
+# Duas camadas, escolhidas automaticamente:
+#
+#  1) PADRAO: CLI oficial do Docker (binario estatico) falando com o daemon
+#     udockerd em tcp://127.0.0.1:2375, que implementa a API do Docker
+#     (run/exec/logs/TTY/build) dirigindo o udocker + proot 5.1.
+#     Da tudo que se espera de `docker`: build, exec, logs, comando em
+#     container vivo, imagem de outra arquitetura por qemu.
+#
+#  2) FALLBACK: se o daemon nao subir, cai para o modo direto (udocker + proot
+#     na hora, sem daemon) — nao tem build/exec/logs, mas roda containers.
+#
+# Comandos de diagnostico (doctor, dns-fix, info) sao sempre atendidos pela
+# camada direta, que e quem sabe inspecionar o motor.
+
+export DOCKER_HOST="tcp://127.0.0.1:${DOCKER_DAEMON_PORT:-2375}"
+API_HTTP="http://127.0.0.1:${DOCKER_DAEMON_PORT:-2375}"   # curl fala http, nao tcp
+export DOCKER_BUILDKIT=0          # o udockerd fala o builder classico, nao BuildKit
+CLI="$HOME/docker-termux/bin/docker"
+DIRETO="$HOME/.hermes/bin/docker-direct"
+DAEMON_UP="$HOME/.hermes/bin/docker-daemon-up"
+
+case "${1:-}" in
+    doctor)
+        "$DIRETO" doctor || true
+        echo
+        echo "=== daemon (API do Docker em userspace) ==="
+        if curl -s -m 2 "$API_HTTP/_ping" 2>/dev/null | grep -q OK; then
+            echo "  [OK  ] udockerd respondendo em $DOCKER_HOST"
+            "$CLI" version --format '  CLI {{.Client.Version}} | daemon {{.Server.Version}}' 2>/dev/null
+        else
+            echo "  [    ] parado — sobe sozinho no proximo docker run/pull"
+        fi
+        echo
+        echo "=== o que esta rodando agora ==="
+        "$CLI" ps --format '  {{.Names}}  {{.Status}}' 2>/dev/null || true
+        exit 0
+        ;;
+    dns-fix|info)
+        exec "$DIRETO" "$@"
+        ;;
+    daemon)
+        case "${2:-status}" in
+            up)     bash "$DAEMON_UP" && echo "daemon no ar em $DOCKER_HOST" ;;
+            down)   bash "$HOME/.hermes/bin/docker-daemon-down" ;;
+            *)      curl -s -m 2 "$API_HTTP/_ping" >/dev/null 2>&1 \
+                        && echo "daemon no ar em $DOCKER_HOST" \
+                        || echo "daemon parado" ;;
+        esac
+        exit 0
+        ;;
+esac
+
+if ! bash "$DAEMON_UP" >/dev/null 2>&1; then
+    echo "aviso: daemon indisponivel — usando modo direto (sem build/exec/logs)" >&2
+    exec "$DIRETO" "$@"
+fi
+
+# O daemon (v0.3.5) so captura o stdout do container quando ele tem TTY:
+# sem `-t`, a saida do processo vai para o log do daemon e `docker logs` fica
+# vazio. Em `run -d` sem TTY inserimos -t e explicamos, para `docker logs`
+# funcionar como o usuario espera.
+if [ "${1:-}" = "run" ]; then
+    tem_d=0; tem_t=0
+    for a in "$@"; do
+        case "$a" in
+            --detach) tem_d=1 ;;
+            --tty)    tem_t=1 ;;
+            -*) # flags curtas agrupadas: -d, -dt, -dit, -it ...
+                case "$a" in -*d*) tem_d=1 ;; esac
+                case "$a" in --*) ;; *t*) tem_t=1 ;; esac
+                ;;
+        esac
+    done
+    if [ "$tem_d" = 1 ] && [ "$tem_t" = 0 ]; then
+        novos=("run" "-t")
+        for a in "${@:2}"; do novos+=("$a"); done
+        set -- "${novos[@]}"
+        echo "dica: -t adicionado para o daemon capturar a saida (limitação do modo userspace; use docker logs em seguida)" >&2
+    fi
+fi
+
+exec "$CLI" "$@"

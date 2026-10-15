@@ -1,0 +1,57 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# docker-daemon-up — garante o daemon udockerd (API do Docker em userspace) no ar.
+#
+# Idempotente: se a API responde, sai na hora. Sobe desgarrado (setsid, PPid 1)
+# para sobreviver ao fim da sessao do Hermes/Termux, com pidfile proprio.
+#
+# udockerd implementa a API do Docker (create/start/stop/rm/exec/logs/TTY/build)
+# dirigindo o udocker; a execucao real e proot 5.1 (via shim em ~/.udocker/bin).
+
+set -u
+BASE="$HOME/docker-termux"
+UDOCKERD="$BASE/venv-udockerd/bin/udockerd"
+STATE="$BASE/state"
+LOG="$BASE/logs/udockerd.log"
+PIDFILE="$STATE/udockerd.pid"
+PORTA="${DOCKER_DAEMON_PORT:-2375}"
+
+mkdir -p "$STATE" "$BASE/logs"
+
+responde() {
+    curl -s -m 2 "http://127.0.0.1:$PORTA/_ping" 2>/dev/null | grep -q OK
+}
+
+if responde; then
+    exit 0
+fi
+
+if [ ! -x "$UDOCKERD" ]; then
+    echo "erro: udockerd nao instalado em $UDOCKERD (rode docker-termux-setup)" >&2
+    exit 1
+fi
+
+# pid antigo ainda subindo? espera em vez de duplicar
+if [ -f "$PIDFILE" ]; then
+    antigo=$(cat "$PIDFILE" 2>/dev/null || echo "")
+    if [ -n "$antigo" ] && kill -0 "$antigo" 2>/dev/null; then
+        for _ in $(seq 1 20); do
+            responde && exit 0
+            sleep 0.5
+        done
+    fi
+fi
+
+termux-wake-lock 2>/dev/null || true
+
+setsid "$UDOCKERD" --host 127.0.0.1 --port "$PORTA" \
+    --data-dir "$HOME/.udocker" --dns 8.8.8.8 --dns 8.8.4.4 \
+    >>"$LOG" 2>&1 < /dev/null &
+echo $! > "$PIDFILE"
+
+for _ in $(seq 1 30); do
+    responde && exit 0
+    sleep 0.5
+done
+
+echo "erro: daemon nao respondeu em 15s — veja $LOG" >&2
+exit 1

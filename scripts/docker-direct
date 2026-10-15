@@ -1,0 +1,752 @@
+#!/data/data/com.termux/files/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""
+docker — CLI compativel com Docker para Termux/Android (sem root, sem daemon).
+
+Motor: udocker 1.3.17 (registry do Docker Hub, camadas OCI, rootfs)
+Execucao: proot 5.1 do Termux (userspace, sem namespaces de kernel)
+
+Quatro bugs do Android/ndk resolvidos aqui (todos medidos, nao supostos):
+ 1. O proot 4.8.0 que o udocker baixa nao rastreia processos filhos no
+    Android 16 -> qualquer fork+exec morre com SIGSYS (signal 31). Curado
+    com um shim que aponta o udocker para o proot 5.1 do Termux.
+ 2. Android nega hardlink dentro do rootfs -> `apk add`/`apt-get` quebram
+    com "failed to write database: Permission denied". Curado com
+    --link2symlink no shim.
+ 3. Android nao tem /etc/resolv.conf -> container sobe sem DNS ("bad
+    address"). Curado injetando resolv.conf no rootfs de cada container.
+ 4. Imagem amd64 exige qemu, e o udocker passava so o nome do binario, que
+    o proot nao acha no PATH do container. Curado com patch que passa o
+    caminho absoluto (+ pacote qemu-user-x86-64).
+
+Uso: docker <comando> [opcoes]   (docker help para a lista)
+"""
+
+import glob
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+PREFIX = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+BASE = os.path.join(HOME, "docker-termux")
+UDOCKER = os.path.join(BASE, "udocker-1.3.17", "udocker", "udocker")
+REPO = os.path.join(HOME, ".udocker")
+CONTAINERS = os.path.join(REPO, "containers")
+LOGDIR = os.path.join(BASE, "logs")
+STATEDIR = os.path.join(BASE, "state")
+
+PLATAFORMA_PADRAO = "linux/arm64"
+NOMES_DNS = ["8.8.8.8", "8.8.4.4"]
+
+VERDE, VERM, AMAR, AZUL, FIM = "\033[32m", "\033[31m", "\033[33m", "\033[36m", "\033[0m"
+
+
+def cor(txt, c):
+    return txt if not sys.stdout.isatty() else c + txt + FIM
+
+
+def err(msg):
+    print(cor("Erro: ", VERM) + msg, file=sys.stderr)
+
+
+def aviso(msg):
+    print(cor("Aviso: ", AMAR) + msg, file=sys.stderr)
+
+
+def info(msg):
+    print(cor("==> ", AZUL) + msg)
+
+
+def ambiente():
+    """Ambiente saneado para o udocker/proot.
+
+    - LD_PRELOAD: o termux-exec injeta libs do Termux que nao existem no
+      rootfs do container; vazar isso mata o processo com SIGSYS.
+    - PROOT_NO_SECCOMP: o seccomp do Android conflita com o do proot.
+    - TMPDIR: sem ele o udocker tenta /tmp, que nao existe no Android.
+    """
+    env = dict(os.environ)
+    env.pop("LD_PRELOAD", None)
+    env.pop("LD_LIBRARY_PATH", None)
+    env["PROOT_NO_SECCOMP"] = "1"
+    env["TMPDIR"] = env.get("TMPDIR") or os.path.join(PREFIX, "tmp")
+    env["PATH"] = os.path.join(PREFIX, "bin") + ":" + env.get("PATH", "")
+    env["LANG"] = env.get("LANG") or "C.UTF-8"
+    return env
+
+
+def udocker(args, capturar=False, silencioso=False):
+    if not os.path.exists(UDOCKER):
+        err("runtime nao instalado em %s — rode: docker-termux-setup" % UDOCKER)
+        sys.exit(2)
+    cmd = [UDOCKER] + ["--quiet"] * silencioso + args
+    if capturar:
+        return subprocess.run(cmd, env=ambiente(), stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, text=True)
+    return subprocess.call(cmd, env=ambiente())
+
+
+def containers_locais():
+    """Mapa nome -> caminho, uma entrada por container.
+
+    O udocker materializa `create --name=X` como um SYMLINK X -> <uuid>.
+    Sem tratar isso o `ps` lista o mesmo container duas vezes; aqui a chave
+    passa a ser o nome amigavel quando ele existe.
+    """
+    achados = {}
+    if not os.path.isdir(CONTAINERS):
+        return achados
+    reais, apelidos = {}, {}
+    for nome in sorted(os.listdir(CONTAINERS)):
+        caminho = os.path.join(CONTAINERS, nome)
+        if os.path.islink(caminho):
+            alvo = os.path.basename(os.path.realpath(caminho))
+            apelidos.setdefault(alvo, []).append(nome)
+        elif os.path.isfile(os.path.join(caminho, "container.json")):
+            reais[nome] = caminho
+    for cid, caminho in reais.items():
+        nomes = apelidos.get(cid, [])
+        achados[nomes[0] if nomes else cid] = caminho
+    return achados
+
+
+def resolve_container(nome):
+    direto = os.path.join(CONTAINERS, nome)
+    if os.path.exists(direto):
+        return os.path.realpath(direto)
+    for k, v in containers_locais().items():
+        if k == nome or k.startswith(nome):
+            return os.path.realpath(v)
+    return None
+
+
+def imagem_local(img):
+    """True se a imagem ja foi puxada.
+
+    Layout do repo do udocker: ~/.udocker/repos/<repo>/<tag>, onde <repo> e
+    o nome apos a barra para imagens com namespace (ex: grafana/grafana ->
+    repos/grafana/grafana/latest).
+    """
+    repos = os.path.join(REPO, "repos")
+    nome, _, tag = img.partition(":")
+    tag = tag or "latest"
+    return os.path.isdir(os.path.join(repos, nome, tag))
+
+
+def fix_dns(nome_ou_caminho):
+    """Injeta resolv.conf no rootfs: no Android nao existe /etc/resolv.conf."""
+    caminho = resolve_container(nome_ou_caminho) if not os.path.isabs(nome_ou_caminho or "") else nome_ou_caminho
+    if not caminho:
+        return False
+    etc = os.path.join(caminho, "ROOT", "etc")
+    if not os.path.isdir(etc):
+        return False
+    try:
+        with open(os.path.join(etc, "resolv.conf"), "w") as f:
+            f.write("".join("nameserver %s\n" % n for n in NOMES_DNS))
+        return True
+    except OSError:
+        return False
+
+
+def fix_dns_todos():
+    n = 0
+    for _, caminho in containers_locais().items():
+        if fix_dns(caminho):
+            n += 1
+    return n
+
+
+def arquitetura_host():
+    import platform as _p
+    m = _p.machine()
+    return "arm64" if m in ("aarch64", "arm64") else "amd64"
+
+
+def precisa_qemu(caminho_container):
+    """True se a imagem do container e de outra arquitetura (roda via qemu)."""
+    try:
+        with open(os.path.join(caminho_container, "container.json")) as f:
+            arq = json.load(f).get("architecture", "")
+    except (OSError, ValueError):
+        return False
+    arq = "arm64" if arq in ("arm64", "aarch64") else arq
+    return bool(arq) and arq != arquitetura_host()
+
+
+def split_nome_tag(img):
+    if ":" in img.split("/")[-1]:
+        return img
+    return img + ":latest"
+
+
+def garantir_imagem(img, plataforma=None):
+    """Puxa a imagem do Docker Hub se ainda nao existir localmente."""
+    img = split_nome_tag(img)
+    if imagem_local(img):
+        return True
+    plat = plataforma or plataforma_alvo(img)
+    info("puxando %s (%s)" % (img, plat))
+    rc = udocker(["pull", "--platform=" + plat, img])
+    if rc != 0:
+        err("falha ao puxar %s" % img)
+        return False
+    return True
+
+
+def plataforma_alvo(img):
+    """Imagem multi-arch: usa arm64 nativo; o usuario pode forcar --platform."""
+    return PLATAFORMA_PADRAO
+
+
+def criar_container(img, nome=None):
+    args = ["create"]
+    if nome:
+        args += ["--name=" + nome]
+    args.append(img)
+    r = subprocess.run([UDOCKER] + args, env=ambiente(), stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True)
+    if r.returncode != 0:
+        err("falha ao criar container a partir de %s\n%s" % (img, r.stdout.strip()))
+        return None
+    # a ultima linha e o id/nome do container
+    cid = [l.strip() for l in r.stdout.splitlines() if l.strip()][-1]
+    return cid
+
+
+# --------------------------------------------------------------------------
+# parsing de opcoes no estilo docker
+# --------------------------------------------------------------------------
+OPTS_COM_VALOR = {"-v", "--volume", "-e", "--env", "-w", "--workdir", "-u", "--user",
+                  "-p", "--publish", "--name", "--entrypoint", "--dns", "--platform",
+                  "--pull", "--env-file", "--label", "-l"}
+
+
+def parse_exec_style(argv):
+    """Separa opcoes, imagem/container e comando (do primeiro nao-opcao em diante)."""
+    opts = {}
+    multi = {"-v": [], "-e": [], "-p": []}
+    i = 0
+    alvo = None
+    comando = []
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            comando = argv[i + 1:]
+            break
+        if alvo is not None:
+            comando = argv[i:]
+            break
+        if a.startswith("--") and "=" in a:
+            k, _, v = a.partition("=")
+            opts[k] = v
+        elif a in OPTS_COM_VALOR:
+            if i + 1 >= len(argv):
+                err("opcao %s exige um valor" % a)
+                sys.exit(2)
+            v = argv[i + 1]
+            i += 1
+            if a in ("-v", "--volume"):
+                multi["-v"].append(v)
+            elif a in ("-e", "--env"):
+                multi["-e"].append(v)
+            elif a in ("-p", "--publish"):
+                multi["-p"].append(v)
+            else:
+                opts[a] = v
+        elif a.startswith("-") and len(a) > 1 and not a.startswith("--"):
+            # flags curtas agrupadas: -it, -dit, -d ...
+            for ch in a[1:]:
+                if ch in "dit":
+                    opts["-" + ch] = True
+                elif ch in "wvuep":
+                    resto = a[a.index(ch) + 1:]
+                    if not resto and i + 1 < len(argv):
+                        i += 1
+                        resto = argv[i]
+                    chave = "-" + ch
+                    if ch in "vep":
+                        multi[chave].append(resto)
+                    else:
+                        opts[chave] = resto
+                    break
+                else:
+                    opts["-" + ch] = True
+        elif a.startswith("--"):
+            opts[a] = True
+        else:
+            alvo = a
+        i += 1
+    return opts, multi, alvo, comando
+
+
+def montar_flags_udocker(opts, multi, comando):
+    args = []
+    for v in multi.get("-v", []):
+        args += ["-v", v]
+    for e in multi.get("-e", []):
+        args += ["-e", e]
+    for w in ("-w", "--workdir"):
+        if w in opts:
+            args += ["-w", opts[w]]
+            break
+    for u in ("-u", "--user"):
+        if u in opts:
+            args += ["-u", opts[u]]
+            break
+    for ep in ("--entrypoint",):
+        if ep in opts:
+            args += ["--entrypoint=" + opts[ep]]
+    for dn in ("--dns",):
+        if dn in opts:
+            args += ["--dns=" + opts[dn]]
+    if opts.get("-i"):
+        args += ["-i"]
+    if opts.get("-t"):
+        args += ["-t"]
+    return args
+
+
+def state_path(nome):
+    return os.path.join(STATEDIR, re.sub(r"[^A-Za-z0-9_.-]", "_", nome) + ".json")
+
+
+def ler_state(nome):
+    p = state_path(nome)
+    if os.path.exists(p):
+        try:
+            with open(p) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+    return {}
+
+
+def gravar_state(nome, dados):
+    os.makedirs(STATEDIR, exist_ok=True)
+    with open(state_path(nome), "w") as f:
+        json.dump(dados, f, indent=1)
+
+
+def pid_vivo(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+# --------------------------------------------------------------------------
+# comandos
+# --------------------------------------------------------------------------
+def cmd_help(argv=None):
+    print("""docker (Termux) — Docker sem root e sem daemon, via udocker + proot
+
+  docker pull <imagem>[:tag]        baixa imagem do Docker Hub (--platform=linux/amd64 p/ x86)
+  docker images                     lista imagens baixadas
+  docker ps [-a]                    containers criados (a = todos, com pid dos -d)
+  docker run [opcoes] IMG [cmd]     cria e executa container
+  docker create [opcoes] IMG        so cria (nao executa)
+  docker exec <ctr> <cmd>           roda comando em container existente
+  docker logs <ctr>                 saida de um `run -d`
+  docker stop <ctr>                 encerra um container em background
+  docker rm <ctr> | rmi <imagem>    remove container / imagem
+  docker search <termo>             busca no Docker Hub
+  docker inspect <ctr|imagem>       metadados
+  docker doctor                     diagnostico do motor
+  docker dns-fix                    injeta resolv.conf em todos os containers
+  docker version | info             versoes e estado
+
+opcoes do run:
+  -v host:ctr   monta volume        -e VAR=val    variavel de ambiente
+  -w /dir       diretorio inicial   -u uid        usuario
+  -it           interativo com tty  -d            roda em background
+  --rm          remove ao terminar  --name=<n>    nome do container
+  --entrypoint=<prog>               --platform=linux/amd64  (emulado por qemu)
+
+limitacoes reais (medidas): sem daemon, sem namespaces de kernel, sem
+`docker build` (use `docker run` + comandos dentro), rede e a do proprio
+Termux (portas nao sao isoladas) e `--memory/--cpus` nao se aplicam.""")
+
+
+def cmd_version(argv=None):
+    print("docker (Termux) 1.0 — udocker + proot userspace")
+    udocker(["version"])
+
+
+def cmd_pull(argv):
+    plataforma = None
+    resto = []
+    i = 0
+    while i < len(argv):
+        if argv[i].startswith("--platform="):
+            plataforma = argv[i].split("=", 1)[1]
+        elif argv[i] == "--platform" and i + 1 < len(argv):
+            i += 1
+            plataforma = argv[i]
+        else:
+            resto.append(argv[i])
+        i += 1
+    if not resto:
+        err("uso: docker pull <imagem>[:tag]")
+        return 2
+    plat = plataforma or plataforma_alvo(resto[0])
+    if plat != PLATAFORMA_PADRAO:
+        aviso("esta tag local passa a ser %s (o repo do udocker guarda UMA "
+              "arquitetura por tag); para voltar a nativa, rode o pull sem "
+              "--platform" % plat)
+    return udocker(["pull", "--platform=" + plat] + resto)
+
+
+def cmd_images(argv=None):
+    return udocker(["images"])
+
+
+def cmd_ps(argv):
+    todos = "-a" in argv or "--all" in argv
+    r = udocker(["ps"], capturar=True)
+    linhas = r.stdout.strip().splitlines()
+    print(cor("CONTAINER".ljust(38) + "STATUS".ljust(14) + "PID", AZUL))
+    achou = False
+    for nome in sorted(containers_locais()):
+        st = ler_state(nome)
+        pid = st.get("pid")
+        vivo = bool(pid) and pid_vivo(pid)
+        if st and not vivo and not todos:
+            continue
+        status = "Up (bg)" if vivo else "Criado"
+        print(nome.ljust(38) + status.ljust(14) + (str(pid) if vivo else "-"))
+        achou = True
+    if not achou:
+        print("(nenhum container)" if todos else "(nenhum container rodando em background; use -a)")
+    return 0
+
+
+def cmd_create(argv):
+    opts, multi, alvo, _ = parse_exec_style(argv)
+    if not alvo:
+        err("uso: docker create [opcoes] <imagem>")
+        return 2
+    if not garantir_imagem(alvo, opts.get("--platform")):
+        return 1
+    nome = opts.get("--name")
+    cid = criar_container(alvo, nome)
+    if not cid:
+        return 1
+    fix_dns(cid)
+    print(cid)
+    return 0
+
+
+def cmd_run(argv):
+    opts, multi, alvo, comando = parse_exec_style(argv)
+    if not alvo:
+        err("uso: docker run [opcoes] <imagem|container> [comando]")
+        return 2
+
+    if multi.get("-p"):
+        aviso("portas nao sao isoladas neste modo: o container usa a rede do "
+              "Termux, entao o servico ja escuta direto (ex: 127.0.0.1:8000). "
+              "-p ignorado de proposito.")
+
+    detach = bool(opts.get("-d") or opts.get("--detach"))
+    nome = opts.get("--name")
+    ctr = resolve_container(nome) if nome else None
+    reusando = False
+    if ctr is None:
+        ctr = resolve_container(alvo)
+        # so conta como "reuso" se o alvo NAO for uma imagem puxada
+        reusando = bool(ctr) and not imagem_local(split_nome_tag(alvo))
+
+    if reusando:
+        aviso("%s e um container que ja existe (nao uma imagem): rodando nele. "
+              "Para comando dentro dele use `docker exec %s <cmd>`." % (alvo, alvo))
+        if opts.get("--rm"):
+            aviso("--rm ignorado aqui de proposito: apagar um container nomeado "
+                  "destroi o que voce instalou dentro; use `docker rm %s`." % alvo)
+
+    if ctr is None:
+        if not garantir_imagem(alvo, opts.get("--platform")):
+            return 1
+        if detach and not nome:
+            nome = "ctr-" + time.strftime("%H%M%S")
+        cid = criar_container(alvo, nome)
+        if not cid:
+            return 1
+        ctr = resolve_container(cid) or os.path.join(CONTAINERS, cid)
+        alvo_container = nome or os.path.basename(os.path.realpath(ctr))
+    else:
+        alvo_container = os.path.basename(os.path.realpath(ctr))
+
+    fix_dns(alvo_container)
+
+    flags = montar_flags_udocker(opts, multi, comando)
+
+    caminho_ctr = resolve_container(alvo_container)
+    if caminho_ctr and precisa_qemu(caminho_ctr) and os.path.isdir("/linkerconfig"):
+        # Sem isto o qemu (binario Android) imprime, a cada processo filho,
+        # "WARNING: linker: failed to find ... ld.config.txt" — o proot nao
+        # tem esse diretorio do sistema Android dentro do rootfs.
+        flags += ["-v", "/linkerconfig:/linkerconfig"]
+    args = ["run", "--nobanner"] + flags + [alvo_container] + comando
+
+    if detach:
+        os.makedirs(LOGDIR, exist_ok=True)
+        log = os.path.join(LOGDIR, alvo_container + ".log")
+        f = open(log, "wb")
+        p = subprocess.Popen([UDOCKER] + args, env=ambiente(),
+                             stdout=f, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+        gravar_state(alvo_container, {"pid": p.pid, "log": log,
+                                      "iniciado": time.time()})
+        print(alvo_container)
+        info("rodando em background (pid %d) — docker logs %s" % (p.pid, alvo_container))
+        return 0
+
+    rc = udocker(args)
+    if opts.get("--rm") and not reusando:
+        udocker(["rm", alvo_container], silencioso=True)
+    return rc
+
+
+def cmd_exec(argv):
+    if len(argv) < 2:
+        err("uso: docker exec <container> <comando> [args]")
+        return 2
+    ctr = resolve_container(argv[0])
+    if not ctr:
+        err("container nao encontrado: %s" % argv[0])
+        return 1
+    fix_dns(os.path.basename(ctr))
+    return udocker(["run", "--nobanner", os.path.basename(ctr)] + argv[1:])
+
+
+def cmd_logs(argv):
+    if not argv:
+        err("uso: docker logs <container>")
+        return 2
+    st = ler_state(argv[0])
+    log = st.get("log")
+    if not log or not os.path.exists(log):
+        err("sem log para %s (so containers de `run -d` guardam saida)" % argv[0])
+        return 1
+    if "-f" in argv or "--follow" in argv:
+        return subprocess.call(["tail", "-f", log])
+    with open(log, "rb") as f:
+        sys.stdout.write(f.read().decode("utf-8", "replace"))
+    return 0
+
+
+def cmd_stop(argv):
+    if not argv:
+        err("uso: docker stop <container>")
+        return 2
+    nome = argv[0]
+    st = ler_state(nome)
+    pid = st.get("pid")
+    if not pid or not pid_vivo(pid):
+        aviso("%s nao esta rodando em background" % nome)
+        return 1
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    for _ in range(20):
+        if not pid_vivo(pid):
+            break
+        time.sleep(0.25)
+    else:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except OSError:
+            pass
+    gravar_state(nome, {})
+    info("%s encerrado" % nome)
+    return 0
+
+
+def cmd_rm(argv):
+    if not argv:
+        err("uso: docker rm <container>")
+        return 2
+    rc = udocker(["rm"] + argv)
+    if rc == 0:
+        p = state_path(argv[0])
+        if os.path.exists(p):
+            os.remove(p)
+    return rc
+
+
+def cmd_rmi(argv):
+    if not argv:
+        err("uso: docker rmi <imagem>[:tag]")
+        return 2
+    return udocker(["rmi"] + argv)
+
+
+def cmd_search(argv):
+    return udocker(["search"] + argv)
+
+
+def cmd_inspect(argv):
+    if not argv:
+        err("uso: docker inspect <container|imagem>")
+        return 2
+    ctr = resolve_container(argv[0])
+    if ctr:
+        caminho = os.path.join(ctr, "container.json")
+        try:
+            with open(caminho) as f:
+                print(json.dumps(json.load(f), indent=2))
+            return 0
+        except (OSError, ValueError):
+            pass
+    return udocker(["inspect", "-p", argv[0]])
+
+
+def cmd_dns_fix(argv=None):
+    n = fix_dns_todos()
+    info("resolv.conf aplicado em %d container(s)" % n)
+    return 0
+
+
+def cmd_doctor(argv=None):
+    ok = True
+    print(cor("docker (Termux) — diagnostico", AZUL))
+
+    def checa(rotulo, condicao, detalhe=""):
+        nonlocal ok
+        marca = cor("OK  ", VERDE) if condicao else cor("FALHA", VERM)
+        print("  [%s] %s %s" % (marca, rotulo, detalhe))
+        if not condicao:
+            ok = False
+
+    checa("runtime udocker", os.path.exists(UDOCKER), UDOCKER)
+    checa("repo udocker", os.path.isdir(CONTAINERS), CONTAINERS)
+
+    shim = os.path.join(REPO, "bin", "proot-arm64-4_8_0")
+    conteudo = ""
+    if os.path.exists(shim):
+        with open(shim, "rb") as f:
+            conteudo = f.read(8192).decode("utf-8", "replace")
+    checa("shim do proot (5.1 + link2symlink)",
+          "link2symlink" in conteudo and "files/usr/bin/proot" in conteudo)
+
+    try:
+        v = subprocess.run([os.path.join(PREFIX, "bin", "proot"), "--version"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, env=ambiente()).stdout.splitlines()
+        checa("proot do Termux", bool(v), v[0] if v else "")
+    except OSError:
+        checa("proot do Termux", False, "instale: pkg install proot")
+
+    qemu = shutil.which("qemu-x86_64")
+    checa("qemu-x86_64 (imagens amd64)", bool(qemu), qemu or "pkg install qemu-user-x86-64")
+
+    patch = ""
+    arq = os.path.join(BASE, "udocker-1.3.17", "udocker", "engine", "proot.py")
+    if os.path.exists(arq):
+        with open(arq) as f:
+            patch = f.read()
+    checa("patch qemu com caminho absoluto", "PATCH ANDROID" in patch)
+
+    # camada daemon (opcional): CLI oficial do docker + udockerd
+    cli = os.path.join(BASE, "bin", "docker")
+    checa("CLI oficial do docker", os.path.exists(cli),
+          subprocess.run([cli, "--version"], stdout=subprocess.PIPE, text=True).stdout.strip()
+          if os.path.exists(cli) else "rode docker-termux-setup")
+
+    sup = glob.glob(os.path.join(HOME, ".udockerd", "udockerd-supervisor-*"))
+    checa("supervisor do daemon compilado", bool(sup),
+          "sem ele `docker logs` do container principal fica vazio")
+
+    daemon_ok = False
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://127.0.0.1:2375/_ping", timeout=2) as r:
+            daemon_ok = r.read().decode().strip() == "OK"
+    except Exception:
+        daemon_ok = False
+    checa("daemon (API do Docker)", daemon_ok,
+          "no ar em tcp://127.0.0.1:2375" if daemon_ok else "parado — sobe sozinho no proximo docker run")
+
+    ns = [n for n in sorted(containers_locais())]
+    sem_dns = [n for n in ns
+               if not os.path.exists(os.path.join(CONTAINERS, n, "ROOT", "etc", "resolv.conf"))]
+    # container criado pelo daemon recebe DNS por conta dele: so o modo direto usa arquivo
+    checa("dns dos containers", not sem_dns or daemon_ok,
+          "%d container(s)" % len(ns)
+          + (" — sem arquivo no modo direto: " + ", ".join(sem_dns) if sem_dns and not daemon_ok else ""))
+
+    livre = shutil.disk_usage(HOME).free / 1e9
+    checa("espaco livre", livre > 2, "%.1f GB" % livre)
+
+    print()
+    print(cor("Tudo pronto." if ok else "Rode: docker-termux-setup para corrigir.", VERDE if ok else AMAR))
+    return 0 if ok else 1
+
+
+def cmd_info(argv=None):
+    print("motor      : udocker 1.3.17 + proot 5.1 (userspace, sem root)")
+    print("repo       : %s" % REPO)
+    print("runtime    : %s" % BASE)
+    print("containers : %d" % len(containers_locais()))
+    plat = "arm64 nativo"
+    if shutil.which("qemu-x86_64"):
+        plat += " + amd64 emulado (qemu)"
+    print("plataforma : %s" % plat)
+    try:
+        livre = shutil.disk_usage(HOME).free / 1e9
+        usado = subprocess.run(["du", "-sh", REPO], stdout=subprocess.PIPE,
+                               text=True).stdout.split()[0]
+        print("disco      : %s usados pelo repo, %.1f GB livres" % (usado, livre))
+    except (OSError, IndexError, ValueError):
+        pass
+    return 0
+
+
+COMANDOS = {
+    "help": cmd_help, "--help": cmd_help, "-h": cmd_help,
+    "pull": cmd_pull, "images": cmd_images, "ps": cmd_ps,
+    "create": cmd_create, "run": cmd_run, "exec": cmd_exec,
+    "logs": cmd_logs, "stop": cmd_stop, "rm": cmd_rm, "rmi": cmd_rmi,
+    "search": cmd_search, "inspect": cmd_inspect,
+    "version": cmd_version, "--version": cmd_version,
+    "doctor": cmd_doctor, "info": cmd_info, "dns-fix": cmd_dns_fix,
+}
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        cmd_help()
+        return 0
+    nome = argv[0]
+    fn = COMANDOS.get(nome)
+    if not fn:
+        if nome in ("start", "restart", "attach", "build", "compose",
+                    "push", "login", "network", "volume", "logs"):
+            err("`docker %s` nao existe neste modo (sem daemon). "
+                "Veja `docker help`." % nome)
+            return 2
+        err("comando desconhecido: %s — veja `docker help`" % nome)
+        return 2
+    try:
+        return fn(argv[1:]) or 0
+    except KeyboardInterrupt:
+        return 130
+    except BrokenPipeError:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

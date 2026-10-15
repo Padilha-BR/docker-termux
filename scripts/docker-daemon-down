@@ -1,0 +1,41 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# docker-daemon-down — encerra o daemon udockerd e os containers que ele subiu.
+#
+# Os containers sao processos proot filhos do daemon; encerrar o grupo de
+# processos do daemon (killpg) leva todos junto, evitando orfaos.
+
+set -u
+BASE="$HOME/docker-termux"
+PIDFILE="$BASE/state/udockerd.pid"
+PORTA="${DOCKER_DAEMON_PORT:-2375}"
+
+if [ ! -f "$PIDFILE" ]; then
+    echo "sem pidfile — daemon provavelmente ja parado"
+    exit 0
+fi
+
+pid=$(cat "$PIDFILE" 2>/dev/null || echo "")
+if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    echo "daemon ja estava parado"
+    rm -f "$PIDFILE"
+    exit 0
+fi
+
+pkill -TERM -P "$pid" 2>/dev/null || true
+kill -TERM "-$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+
+for _ in $(seq 1 20); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25
+done
+
+if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "-$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+fi
+
+rm -f "$PIDFILE"
+if curl -s -m 2 "http://127.0.0.1:$PORTA/_ping" >/dev/null 2>&1; then
+    echo "aviso: algo ainda responde na porta $PORTA" >&2
+    exit 1
+fi
+echo "daemon encerrado"
