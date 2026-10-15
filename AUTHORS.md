@@ -29,6 +29,16 @@ this work stands on:
 | [Draken119/cdriv](https://github.com/Draken119/cdriv) | WebDriver client in pure `requests` for Termux |
 | [OshekharO/Docker-On-Android](https://github.com/OshekharO/Docker-On-Android) | the kernel-Docker path with root + a custom kernel |
 
+## External code review
+
+The static review by [@pablo-afterlife](https://github.com/pablo-afterlife)
+([PR #1](https://github.com/Padilha-BR/docker-termux/pull/1), merged) found real defects in
+this repository's own scripts — among them a bare backtick that made the **shell execute
+`docker logs` on every `docker run -d`**, a container lookup that could target the wrong
+container, a `stop` that killed by recycled PID, and a wake-lock that was never released
+(so the phone stopped sleeping). He could not run Android; every fix was re-validated on
+the device afterwards.
+
 ## What this repository contributes
 
 1. A **two-layer dispatcher** with automatic fallback between the daemon and the direct

@@ -29,6 +29,16 @@ em que este trabalho se apoia:
 | [Draken119/cdriv](https://github.com/Draken119/cdriv) | cliente WebDriver em `requests` puro para o Termux |
 | [OshekharO/Docker-On-Android](https://github.com/OshekharO/Docker-On-Android) | o caminho do Docker de kernel com root + kernel customizado |
 
+## Revisão de código externa
+
+A revisão estática de [@pablo-afterlife](https://github.com/pablo-afterlife)
+([PR #1](https://github.com/Padilha-BR/docker-termux/pull/1), mergeado) achou defeitos
+reais nos scripts deste repositório — entre eles um backtick sem escape que fazia o
+**shell executar `docker logs` a cada `docker run -d`**, uma busca de container que podia
+acertar o container errado, um `stop` que matava por PID reciclado e um wake-lock que
+nunca era devolvido (o aparelho parava de dormir). Ele não tinha Android; cada correção
+foi revalidada no aparelho depois.
+
 ## O que é contribuição deste repositório
 
 1. **Dispatcher de duas camadas** com fallback automático entre daemon e motor
