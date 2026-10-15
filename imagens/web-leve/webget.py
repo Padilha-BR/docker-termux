@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """webget — baixa uma pagina e extrai o conteudo util. Roda DENTRO do container.
 
-Nivel 1 (sem navegador): rapido e barato. Se o conteudo vier por JavaScript,
-o texto sai vazio — nesse caso use `webprint`/`webplay` (com Chromium).
+Nivel 1 (sem navegador): rapido e barato (~1,5 s). Se o conteudo vier por
+JavaScript, o texto sai vazio e o exit e 3 — nesse caso suba para `webprint`
+(Chromium nativo) ou `webcdp` (CDP puro, o mais rapido dos dois).
 
 Uso:
     webget URL [--texto|--html|--links|--json] [-o ARQUIVO] [--seletor CSS]
@@ -95,9 +96,16 @@ def main() -> int:
     else:
         sys.stdout.write(conteudo + ("\n" if conteudo else ""))
 
+    # O exit 3 avisa "esta pagina so existe com JavaScript — suba de nivel". Ele
+    # so vale para os modos que leem CONTEUDO: uma pagina legitimamente sem links
+    # nao e isso, e mandar o chamador abrir um Chromium de ~1 GB por causa disso
+    # seria falso positivo.
     if not conteudo.strip():
+        if args.links:
+            print("webget: nenhum link externo nesta pagina", file=sys.stderr)
+            return 0
         print("webget: conteudo vazio — a pagina provavelmente renderiza via "
-              "JavaScript; use `webprint` (Chromium) ou `webplay`.",
+              "JavaScript; use `webprint` (Chromium nativo) ou `webcdp` (CDP).",
               file=sys.stderr)
         return 3
     return 0

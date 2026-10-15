@@ -329,8 +329,9 @@ trabalho de campo às correções — tudo executado dentro do aparelho, por ter
 
 | caminho | o que é |
 |---|---|
+| `verificar.sh` | **a bateria que prova o stack inteiro** (16 itens, ~1 min, não altera nada) |
 | `scripts/` | o dispatcher `docker`, o motor direto, o ciclo do daemon e o instalador |
-| `ferramentas/` | `pdf`, `pdfpy`, `webget`, `webprint`, `webplay` e o helper `webauto.py` |
+| `ferramentas/` | `pdf`, `pdfpy`, `webget`, `webprint`, `webcdp`, `webplay` e o helper `webauto.py` |
 | `imagens/` | Dockerfiles **e as fontes autorais** (`md2pdf`, `webget.py`, `webprint.py`) |
 | `testes/` | benchmarks de headless (tempo + RAM) e a bateria de testes do PDF |
 | `examples/` | exemplos rodando: Manim (vídeo) e automação web (Selenium) |
