@@ -230,8 +230,24 @@ imagem amd64 executando em **1,6 s**; ~370 MB de imagens em disco após os teste
 
 ---
 
+## O que o dispatcher conserta por você (achado testando)
+
+Três diferenças do daemon `udockerd` 0.3.5 que custariam tempo, todas já
+tratadas automaticamente pelo comando `docker`:
+
+| sintoma | causa | o que o dispatcher faz |
+|---|---|---|
+| `docker pull` falha com `no image found in manifest for platform (android/arm64)` | a lib do udocker detecta a plataforma como **android/arm64** e o Docker Hub não publica isso | roteia `pull` para o motor direto, que puxa com `--platform=linux/arm64`; o daemon enxerga a imagem depois (mesmo `~/.udocker`) |
+| `docker run -v` monta **nada**, sem erro | o udockerd nunca lê `HostConfig.Binds` (a string `Binds` não existe no código dele; o motor udocker por baixo tem o suporte, mas `opt["vol"]` fica vazio) — [issue #9](https://github.com/bjia56/udockerd/issues/9) | detecta `-v`/`--volume`/`--mount` e roda pelo motor direto, que monta via `-b` do proot |
+| `docker build` falha com `no such image: <base do FROM>` | o builder do daemon não puxa o `FROM` (o Docker real puxa) | lê o `Dockerfile` do contexto, acha as imagens base e puxa antes de construir |
+| `docker logs` de container destacado volta vazio | sem TTY o stdout herda o do daemon — [issue #8](https://github.com/bjia56/udockerd/issues/8) | insere `-t` em `run -d` e avisa |
+
 ## Limitações honestas
 
+- **Não reinicie o daemon com um build rodando:** `docker daemon down` mata o
+  grupo de processos e leva o build/containers junto (morre com
+  `terminated with signal 15` e o Dockerfile continua com pacotes pela metade).
+- No Ubuntu 24.04 use `python3 -m pip` no Dockerfile — o comando `pip` não existe.
 - `docker compose`, `docker network`, `docker volume` (como objetos), `swarm`,
   BuildKit, healthcheck, restart policy, `--memory/--cpus` e `docker push` não
   existem neste modo.

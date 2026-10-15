@@ -75,6 +75,15 @@ usa `/tmp`, inexistente no Android). Imagem amd64 imprime aviso do linker do
 Android a cada processo; cura com bind `-v /linkerconfig:/linkerconfig` (o CLI
 faz sozinho quando a imagem não é da arquitetura do host).
 
+## O dispatcher conserta sozinho (não reintroduza estes bugs)
+
+| se o usuário reclamar de... | causa real | tratamento no `~/.hermes/bin/docker` |
+|---|---|---|
+| `docker pull` falha: `no image found in manifest for platform (android/arm64)` | a lib do udocker vê plataforma `android/arm64`; o Hub não publica isso | `pull` vai para o motor direto (`--platform=linux/arm64`); o daemon vê a imagem depois |
+| `docker run -v` não monta nada (sem erro) | udockerd ignora `HostConfig.Binds` — `grep -rn Binds` não acha nada no pacote (issue #9) | `-v`/`--volume`/`--mount` em `run`/`create` vão para o motor direto, que monta com `-b` |
+| `docker build` -> `no such image: <FROM>` | o builder do daemon não puxa o `FROM` | o dispatcher lê o Dockerfile do contexto e puxa as bases antes |
+| `docker logs` vazio em container destacado | sem TTY o stdout herda o do daemon (issue #8) | injeta `-t` em `run -d` com aviso |
+
 ## Armadilhas que custam tempo
 
 - **`docker logs` de container destacado exige `-t`** no udockerd 0.3.5: sem TTY a
@@ -90,6 +99,13 @@ faz sozinho quando a imagem não é da arquitetura do host).
   sobrescreve a imagem arm64 local daquela tag. Para voltar, pull sem `--platform`.
 - **Nunca `pkill -f udockerd`**: a própria linha de comando casa com o padrão e
   mata a sua shell (e o daemon). Use o pidfile: `docker daemon down`.
+- **Não reinicie o daemon com build rodando.** `docker daemon down` mata o grupo
+  de processos e leva os containers junto — um `docker build` em andamento morre
+  com `proot info: vpid 1: terminated with signal 15` e o Dockerfile segue com
+  pacotes pela metade (ex.: `pip: not found` no passo seguinte). Termine o build
+  antes de mexer no daemon.
+- **`pip` não existe no Ubuntu 24.04**: use `python3 -m pip` no Dockerfile, senão
+  o passo falha com `/bin/sh: 1: pip: not found`.
 - **O daemon precisa ser desgarrado** (`setsid`, PPid 1) para sobreviver ao fim da
   sessão do Hermes; `docker-daemon-up` cuida disso.
 - Alternativas quando o pedido é "uma distro Linux no celular": `proot-distro`

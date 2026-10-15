@@ -151,6 +151,31 @@ if [ -x "$VENV/bin/python" ]; then
 from udockerd.supervisor import ensure_supervisor
 print('  supervisor:', ensure_supervisor())
 " 2>&1 | tail -2 || amarelo "  supervisor nao compilou (precisa de cc/clang)"
+
+    # O daemon usa a LIB udocker instalada no venv (copia propria). Ela precisa
+    # do mesmo patch do qemu: sem isso, imagem amd64 pelo daemon morre com
+    # "proot error: 'qemu-x86_64' not found".
+    PY_VENV=$(ls -d "$VENV"/lib/python*/site-packages/udocker/engine/proot.py 2>/dev/null | head -1)
+    if [ -n "$PY_VENV" ] && ! grep -q "PATCH ANDROID" "$PY_VENV"; then
+        python3 - "$PY_VENV" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+velho = """        qemu_filename = self._get_qemu()
+        return ["-q", qemu_filename] if qemu_filename else []"""
+novo = """        # PATCH ANDROID: caminho absoluto do qemu (o proot procura no PATH do
+        # container, que nao tem qemu).
+        qemu_filename = self._get_qemu(return_path=True)
+        return ["-q", qemu_filename] if qemu_filename else []"""
+if velho in s:
+    open(p, "w", encoding="utf-8").write(s.replace(velho, novo, 1))
+    print("  patch do qemu aplicado na lib do daemon")
+else:
+    print("  AVISO: lib do daemon sem o trecho esperado")
+PYEOF
+        verde "  lib do daemon ajustada"
+        ( bash "$HOME/.hermes/bin/docker-daemon-down" >/dev/null 2>&1 || true )
+    fi
 fi
 
 CLI="$BASE/bin/docker"

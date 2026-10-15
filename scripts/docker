@@ -22,6 +22,65 @@ CLI="$HOME/docker-termux/bin/docker"
 DIRETO="$HOME/.hermes/bin/docker-direct"
 DAEMON_UP="$HOME/.hermes/bin/docker-daemon-up"
 
+# --- imagem ausente? puxa pelo motor direto --------------------------------
+# O daemon NAO consegue puxar imagem: a lib do udocker detecta a plataforma como
+# "android/arm64" e o Docker Hub nao publica essa plataforma
+# ("no image found in manifest for platform (android/arm64)"). O modo direto
+# puxa com --platform=linux/arm64 e o daemon enxerga a imagem depois (mesmo
+# ~/.udocker). Sem isto, `docker run` de imagem nova e `docker build` cujo FROM
+# nao esta local falham com mensagem enganosa.
+flags_com_valor="-v --volume -e --env -p --publish -w --workdir -u --user \
+--name --entrypoint --dns --platform --network --label --mount --add-host \
+-m --memory -c --cpus --pid --ipc --ulimit --device --env-file --pull"
+
+achar_imagem() {   # imprime o primeiro argumento que nao e flag nem valor de flag
+    local pular=0 a
+    for a in "$@"; do
+        if [ "$pular" = 1 ]; then pular=0; continue; fi
+        case "$a" in
+            --*=*|-*=|--*" "*) continue ;;
+        esac
+        local v
+        for v in $flags_com_valor; do
+            [ "$a" = "$v" ] && { pular=1; continue 2; }
+        done
+        case "$a" in
+            -*) continue ;;             # flag simples
+            *)  printf '%s' "$a"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+tem_imagem() { "$CLI" image inspect "$1" >/dev/null 2>&1; }
+tem_container() { "$CLI" container inspect "$1" >/dev/null 2>&1; }
+
+garantir_imagem() {
+    local img="$1"
+    [ -z "$img" ] && return 0
+    tem_imagem "$img" && return 0
+    tem_container "$img" && return 0        # e um container existente, nao imagem
+    echo "aviso: imagem '$img' ausente — puxando pelo motor direto (o daemon nao resolve android/arm64)" >&2
+    "$DIRETO" pull "$img" >&2 || return 1
+    tem_imagem "$img"
+}
+
+from_do_dockerfile() {   # le o contexto e imprime as imagens base do FROM
+    local ctx="." arq="" a pular=0 ultimo=""
+    for a in "$@"; do
+        if [ "$pular" = 1 ]; then arq="$a"; pular=0; continue; fi
+        case "$a" in
+            -f|--file) pular=1 ;;
+            --*=*|-t|-q|--no-cache|--pull|-*|--*) continue ;;
+            *) ultimo="$a" ;;
+        esac
+    done
+    [ -n "$ultimo" ] && ctx="$ultimo"
+    [ -z "$arq" ] && arq="$ctx/Dockerfile"
+    [ -f "$arq" ] || return 0
+    awk 'tolower($1)=="from" {print $2}' "$arq" | grep -v '^$'
+}
+
 case "${1:-}" in
     doctor)
         "$DIRETO" doctor || true
@@ -91,5 +150,47 @@ if ! ls "$HOME"/.udockerd/udockerd-supervisor-* >/dev/null 2>&1; then
         "from udockerd.supervisor import ensure_supervisor; ensure_supervisor()" \
         >/dev/null 2>&1 || true
 fi
+
+# --- garante a imagem antes de rodar, criar ou construir -------------------
+case "${1:-}" in
+    pull)
+        # o daemon nao puxa (plataforma android/arm64); o motor direto puxa.
+        exec "$DIRETO" "$@"
+        ;;
+    run|create)
+        # Dois casos que o daemon nao atende bem, roteados para o motor direto:
+        #  a) -v/--mount: o udockerd ignora HostConfig.Binds (a string "Binds" nao
+        #     existe no codigo dele) — o bind seria descartado em silencio;
+        #  b) --platform de OUTRA arquitetura: o bind -v /linkerconfig (que
+        #     silencia o aviso do linker do Android no qemu) depende de bind, e o
+        #     daemon nao faz binds.
+        precisa_direto=""
+        for a in "${@:2}"; do
+            case "$a" in
+                -v|--volume|--mount) precisa_direto="bind (-v)" ;;
+                --platform=*)
+                    case "$a" in
+                        *arm64|*aarch64) ;;
+                        *) precisa_direto="cross-arch ($a)" ;;
+                    esac ;;
+                --*) ;;
+                -*) case "$a" in *v*) precisa_direto="bind (-v)" ;; esac ;;
+            esac
+        done
+        if [ -n "$precisa_direto" ]; then
+            echo "aviso: $precisa_direto exige o motor direto; usando modo direto" >&2
+            exec "$DIRETO" "$@"
+        fi
+        img=$(achar_imagem "${@:2}" || true)
+        garantir_imagem "$img" || true
+        ;;
+    build)
+        while read -r base; do
+            [ -z "$base" ] && continue
+            case "$base" in scratch) continue ;; esac
+            garantir_imagem "$base" || true
+        done < <(from_do_dockerfile "${@:2}")
+        ;;
+esac
 
 exec "$CLI" "$@"
