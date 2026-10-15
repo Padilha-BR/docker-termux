@@ -19,7 +19,7 @@ REAL="${UDOCKER_REAL:-$PREFIX/bin/udocker}"
 DISPATCHER="$HOME/.hermes/bin/docker"
 
 case "${1:-}" in
-    build|exec|logs|compose)
+    build|exec|logs)
         if [ ! -x "$DISPATCHER" ]; then
             printf 'erro: %s nao encontrado\n' "$DISPATCHER" >&2
             exit 2

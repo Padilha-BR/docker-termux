@@ -1,8 +1,9 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# verificar.sh — prova que o stack inteiro FUNCIONA, item por item, em ~2 min.
+# verificar.sh — prova que o stack inteiro FUNCIONA, item por item.
 #
-# Não altera nada: só lê e executa. Nenhuma escrita na escola (o SPONTE é
-# consultado apenas em modo leitura) e nenhum build.
+# Não altera CONFIGURAÇÕES do aparelho, mas MUDA estado: sobe o daemon (com
+# wake-lock), baixa imagens e roda containers em ~/.udocker. Nenhum build de
+# imagem é disparado, salvo se o webget cair no modo container (venv ausente).
 #
 # Uso:  bash verificar.sh            (tudo)
 #       bash verificar.sh rapido     (pula o que baixa imagem/container)
@@ -11,6 +12,8 @@
 
 set -uo pipefail
 export PATH="$HOME/.hermes/bin:$PATH"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+TMPDIR="${TMPDIR:-$PREFIX/tmp}"    # set -u derruba o script se TMPDIR vier ausente
 RAPIDO="${1:-}"
 
 PASSOU=0
@@ -21,9 +24,6 @@ FALHAS=()
 ok()    { PASSOU=$((PASSOU+1)); printf '  \033[32m[OK]\033[0m   %-34s %s\n' "$1" "${2:-}"; }
 falha() { FALHOU=$((FALHOU+1)); FALHAS+=("$1"); printf '  \033[31m[FALHA]\033[0m %-33s %s\n' "$1" "${2:-}"; }
 pulou() { PULOU=$((PULOU+1)); printf '  \033[33m[--]\033[0m   %-34s %s\n' "$1" "${2:-}"; }
-
-# tira a medida de tempo do cabeçalho de cada teste
-cronometrar() { "$@" 2>&1; }
 
 echo "=============================================================="
 echo " VERIFICACAO DO STACK — $(date '+%d/%m/%Y %H:%M')"
@@ -154,7 +154,7 @@ for p in os.listdir('/proc'):
         exe = os.readlink(f'/proc/{p}/exe')
     except OSError:
         continue
-    if 'chromium' in exe or exe.endswith('/chrome') or 'dokid' in exe:
+    if 'chromium' in exe or exe.endswith('/chrome') or 'udockerd' in exe:
         n += 1
 print(n)
 PY
