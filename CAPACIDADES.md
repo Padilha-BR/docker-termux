@@ -34,9 +34,10 @@ Onde algo não foi testado, está escrito **"não testado"**.
 |---|---|
 | **Manim** (render de vídeo) | imagem Ubuntu 24.04 + cairo/pango/ffmpeg; vídeo **h264 1280×720 30fps** gerado no aparelho em 30,9 s |
 | **Markdown → PDF** tipografado | weasyprint em container, capa/A4/emoji |
-| **HTTP puro** (nível 1) | baixa e extrai texto/links: **4,3 s, ~34 MB** |
+| **HTTP puro** (nível 1) | extrai texto/links **nativo em 1,7 s** (~34 MB); o mesmo fetch pelo container levava 16 s |
 | **Chromium headless** (nível 2) | **nativo** (não no container): estática **2,8 s**, SPA **4,7 s**, PNG, PDF |
 | **Selenium + chromedriver** (nível 3) | clique real, espera por elemento, screenshot em **4,0-4,8 s** |
+| **CDP puro** (nível 3 mais rápido) | lê título, executa JS e tira screenshot em **1,9-2,5 s**, sem Selenium |
 | `uname -m`, `apk add`, `apt-get install` | tudo exit 0 (os testes que pegam os defeitos de proot) |
 
 ---
@@ -200,6 +201,63 @@ ela que traz os três defeitos do `udockerd` que o dispatcher contorna.
 
 ---
 
+## 3.6 Alternativas que existem hoje — o que **medimos** e o que não testamos
+
+Registrado em 15/10/2026. Tudo abaixo marcado "medido" foi executado neste
+aparelho; o resto é leitura de documentação de terceiros, e está marcado como tal.
+
+| Alternativa | Estado | Números |
+|---|---|---|
+| `pkg install udocker` (oficial) | ✅ **medido** — resolve 4 dos 5 defeitos deste repo | ver §3.5 |
+| **[Doki](https://github.com/OpceanAI/Doki)** v0.12.0 (binário Android ARM64, 14 MB) | ⚠️ **medido, com lacunas graves** | `run alpine echo` **0,79 s**, `pull alpine` 5,5 s, `doki-compose` existe; `-v x:/teste` monta certo, **mas `:ro` é ignorado** (§3.6.2) |
+| **CDP puro** (Chromium nativo + `websockets`) | ✅ **medido** | página estática em **1,9 s** contra 4,3 s do Selenium, sem `chromedriver` |
+| Playwright **via Node/npm** | 📄 documentado por terceiros, **não testado aqui** | `playwright-core` + `PLAYWRIGHT_BROWSERS_PATH=0` + `executablePath` — em **Python** não existe wheel para Android; em **Node** existe |
+| **[Podroid](https://github.com/ExTV/Podroid)** (APK, QEMU + kernel próprio) | 📄 **não testado** | Docker/Podman/LXC reais sem root, Android 14+ |
+| **proot-distro v5** | 📄 **não testado** | traz udocker integrado, `--bind`, `--shared-home` |
+
+### 3.6.2 O Doki aceita `:ro` e **ignora** — falha silenciosa (medido)
+
+Melhor que o udocker em um ponto e **pior** em outro, e o detalhe importa:
+
+    doki run --rm -v "$TMPDIR/doki-ro:/teste:ro" alpine sh -c "echo escrito > /teste/novo.txt"
+    # o comando PASSOU e o novo.txt APARECEU no host
+
+| | udocker | Doki |
+|---|---|---|
+| `-v x:/teste:ro` | monta em `/teste:ro` e o arquivo não aparece — **falha visível** | monta no lugar certo e **deixa escrever** — **falha silenciosa** |
+
+O udocker erra o caminho, o que você percebe na hora. O Doki aceita a sintaxe e
+**descarta a restrição de read-only**: quem escreve `:ro` achando que protegeu o
+host está desprotegido. Para um mount só-leitura vindo de dado de terceiro, isso
+é pior que o erro do udocker — por isso vai como bug prioritário no upstream.
+
+### As duas lacunas do Doki (medidas, com evidência)
+
+1. **Rede dentro do container não funciona.** O daemon roda
+   `dns server started ... addr 127.0.0.11:8053` e explica que a porta 53 é
+   bloqueada por SELinux — mas o `/etc/resolv.conf` que ele entrega ao container
+   aponta para `nameserver 127.0.0.11` **sem porta**, ou seja, para a 53. Resultado:
+   `apk add`/`curl`/`wget` de dentro do container não resolvem. `--network host`
+   não mudou isso aqui.
+2. **`build` recusa o contexto**: `Error: build context outside allowed directory`,
+   inclusive com o contexto dentro de `$HOME`.
+
+Isso não invalida o Doki — ele ainda é mais rápido e mais simples que a solução
+deste repositório, **e o `:ro` que nos morde não existe nele**. Mas hoje ele não
+substitui este stack para o caso que mais usamos (rede + `apk`/`apt` dentro do
+container). São bugs a acompanhar; os dois têm reprodução mínima e merecem ser
+reportados no upstream.
+
+### Becos sem saída confirmados por terceiros (não perca tempo)
+
+| Tentativa | Resultado |
+|---|---|
+| `podman` rootless dentro do proot | `cannot clone: Invalid argument` — mantenedor do Podman: *"proot is not powerful enough to run Podman"* ([podman#26186](https://github.com/containers/podman/issues/26186)) |
+| `runsc`/gVisor | panics no Android ([gvisor#12544](https://github.com/google/gvisor/issues/12544)) |
+| `pkg install docker` sem root | não existe: o pacote vive em `root-packages/` e exige root + kernel compatível |
+
+---
+
 ## 4. O que já existia antes (crédito — nada disto é invenção nossa)
 
 Este trabalho **não inventou** o conceito. O que ele faz é integrar, corrigir e medir:
@@ -253,8 +311,9 @@ Este trabalho **não inventou** o conceito. O que ele faz é integrar, corrigir 
 |---|---|
 | rodar uma ferramenta Linux que não existe no Termux | `docker run <imagem>` (este repo) |
 | um Linux completo para trabalhar | `proot-distro login <distro>` |
-| ler texto de uma página | **HTTP puro** (`webget`) — 34 MB contra ~1 GB do navegador |
-| página que só existe com JavaScript | `webprint` (Chromium **nativo**) |
-| clicar, preencher, esperar elemento | `webplay` (Selenium + chromedriver nativo) |
+| ler texto de uma página | **HTTP puro** (`webget`, nativo) — 1,7 s e 34 MB; resolve mais do que parece (SSR) |
+| **imagem** da página (PNG/PDF) | `webprint` (Chromium **nativo**) — 1 GB de RAM, mas é o único que dá imagem |
+| clicar, preencher, esperar elemento | `webcdp` (CDP puro, 1,9 s) ou `webplay` (Selenium) |
+| página sem texto no DOM (canvas) | **nenhum** extrai texto: nem HTTP, nem Chromium |
 | `docker compose`, cgroups, rede isolada | **não dá** — QEMU (lento) ou root |
 | automação de um sistema com cota de sessão | **HTTP puro, nunca navegador** — o navegador abre sessão de verdade e a cota é a mesma |

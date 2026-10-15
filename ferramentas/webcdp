@@ -1,0 +1,33 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# webcdp — nível 3 de headless SEM Selenium e SEM chromedriver (CDP puro).
+#
+# Fala com o depurador embutido do Chromium nativo. Medido: 1,9 s numa página
+# estática, contra 4,3 s da via Selenium (não há chromedriver no meio).
+#
+# Uso:
+#   webcdp https://site.com --texto            # texto com o JS já executado
+#   webcdp https://site.com --titulo
+#   webcdp https://site.com --html -o p.html
+#   webcdp https://site.com --screenshot p.png
+#   webcdp https://site.com --js "expressao JS"
+#
+# Saída: 0 ok | 2 erro de uso/ambiente | 3 carregou mas sem conteúdo.
+#
+# Precisa do python do Hermes (o `websockets` está lá; o python3 do sistema
+# não tem) e do Chromium nativo — este wrapper garante os dois antes de rodar.
+set -uo pipefail
+
+PY="$HOME/hermes-agent/venv/bin/python"
+SCRIPT="$HOME/.hermes/bin/webcdp.py"
+CHROME="${CHROMIUM_BIN:-chromium-browser}"
+
+erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
+
+[ -f "$SCRIPT" ] || erro "webcdp.py nao encontrado em $SCRIPT"
+[ -x "$PY" ] || erro "python do Hermes ausente em $PY"
+command -v "$CHROME" >/dev/null 2>&1 || erro \
+    "$CHROME nao encontrado — instale: pkg install x11-repo && pkg install chromium"
+"$PY" -c "import websockets" 2>/dev/null || erro \
+    "o python do Hermes nao tem 'websockets' (rode: $PY -m pip install websockets)"
+
+exec "$PY" "$SCRIPT" "$@"

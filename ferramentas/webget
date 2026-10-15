@@ -1,9 +1,9 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # webget — baixa uma pagina e extrai o conteudo (NIVEL 1: sem navegador).
 #
-# Barato e rapido (~1 s, ~30 MB de RAM): HTTP + parser. Use PRIMEIRO. Se o texto
-# vier vazio, a pagina renderiza via JavaScript — aí e `webprint` (Chromium) ou
-# `webplay` (Playwright).
+# Barato e rapido (medido: 1,5 s NATIVO, ~30 MB) — HTTP + parser, sem navegador.
+# Use PRIMEIRO. Se o texto vier vazio (exit 3), a pagina so existe com JavaScript:
+# suba para `webprint` (Chromium nativo) ou `webcdp` (CDP puro, o mais rapido).
 #
 # Uso:
 #   webget https://exemplo.com
@@ -16,15 +16,26 @@ set -uo pipefail
 
 IMG="web:1"
 FONTE="$HOME/docker-termux/imagens/web-leve"
+PY="$HOME/hermes-agent/venv/bin/python"
 
 erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
 
 case "${1:-}" in
     ""|-h|--help|--ajuda)
-        sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
         exit 2
         ;;
 esac
+
+# --- modo NATIVO primeiro (medido: 1,5 s contra 16 s no container) -----------
+# O proot cobra por entrada do diretorio montado: montar o $PWD (o $HOME tem
+# centenas de entradas) custa ~6 s, e o container sem bind nenhum ja custa 4 s.
+# O script so precisa de httpx/bs4/lxml, que o venv do Hermes tem — entao o
+# container virou fallback. Pula o modo nativo com WEBGET_CONTAINER=1.
+if [ "${WEBGET_CONTAINER:-0}" != "1" ] && [ -x "$PY" ] && \
+   "$PY" -c "import httpx, bs4, lxml" >/dev/null 2>&1; then
+    exec "$PY" "$FONTE/webget.py" "$@"
+fi
 
 if ! docker image inspect "$IMG" >/dev/null 2>&1; then
     echo "==> imagem $IMG ausente; construindo (1-2 min)" >&2

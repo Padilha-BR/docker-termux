@@ -105,9 +105,10 @@ execução (avisa).
 
 | nível | ferramenta | quando | custo medido | estado |
 |---|---|---|---|---|
-| 1 | `webget` (httpx + bs4/lxml, container) | HTML já traz o conteúdo (notícia, blog, doc, wiki) — **comece aqui** | 4,3 s, ~34 MB | **OK** |
+| 1 | `webget` (httpx + bs4/lxml, **nativo**) | HTML já traz o conteúdo — **comece aqui, resolve quase tudo** | **1,7 s**, ~34 MB | **OK** |
 | 2 | `webprint` (Chromium **nativo**, sem container) | página precisa de JS, ninguém precisa clicar | 2,9 s (estática) / 4,7 s (SPA) | **OK (medido)** |
-| 3 | `webplay` (Selenium + chromedriver nativo) | login, formulário, esperar seletor, várias abas | 4,0-4,8 s, ~1 GB | **OK (medido)** |
+| 3 | `webcdp` (CDP puro, **sem Selenium**) | leitura + JS + screenshot — mais rápido que o Selenium | 1,9-2,5 s, ~1 GB | **OK (medido)** |
+| 3b | `webplay` (Selenium + chromedriver) | clique/formulário com API familiar | 4,0-4,8 s, ~1 GB | **OK (medido)** |
 
 **Nenhum Chromium sobrevive ao `proot`** (medido: Chrome for Testing 156 e
 `chrome-headless-shell` 156, arm64 nativos). Sintomas: `Trace/breakpoint trap`
@@ -132,7 +133,24 @@ O mesmo fetch pelo `webget` dentro do container variou de 4 a 9 s (cada chamada 
 de novo), então o headless nativo ganha em tempo — mas perde feio em RAM.
 Os erros de `dbus`/`udev` no stderr são inofensivos (Android não tem bus).
 
-**Nível 3 = Selenium, não Playwright**: o Playwright não tem wheel para Android
+**Nível 1 resolve mais do que parece — e o container cobra caro.** Medido: o
+`webget` **nativo** extrai 8.097 chars de `react.dev`, 3.559 de `vercel.com` e
+2.106 de `vuejs.org`; a falha que parecia "SPA precisa de JS" era **DNS dentro do
+container** (`EAI_AGAIN`). O que nenhum nível resolve é página **sem texto no DOM**
+(canvas: `excalidraw.com` dá 32 chars no nível 1 e 11 no Chromium). E o `proot`
+cobra **por entrada do diretório montado**: container sem bind 4 s, com bind de
+diretório vazio 7 s, com bind do `$HOME` (728 entradas) **13 s** — por isso o
+`webget` roda nativo primeiro e o container é fallback (`WEBGET_CONTAINER=1`
+força o antigo).
+
+**Nível 3 mais rápido: CDP puro.** `webcdp URL [--texto|--titulo|--html|--js EXPR|
+--screenshot ARQ]` fala Chrome DevTools Protocol por WebSocket — **sem Selenium e
+sem chromedriver**, medido em 1,9-2,5 s contra 4,0-4,8 s da via Selenium. Pegadinha
+que trava 70 s se você errar: o `webSocketDebuggerUrl` de `/json/version` é o
+endpoint do **browser**, e comandos `Page.*` nele não respondem — é preciso o alvo
+de **página** (`/json/list`, `type == "page"`). Exit 3 = página sem conteúdo.
+
+**Nível 3b = Selenium, não Playwright**: o Playwright não tem wheel para Android
 (`pip install playwright` → `No matching distribution found`). O caminho é
 `chromedriver` (vem no pacote `chromium`, mesma versão) + `selenium` (Python puro,
 instalado em `~/docker-termux/venv-web`). O helper `webauto.py` já traz as flags do
@@ -149,8 +167,9 @@ O wrapper `webprint` já usa essa via (`--dom|--texto|--pdf|--png`); `CHROMIUM_B
 troca o binário e `WEBPRINT_TIMEOUT` o timeout. Sem `pkg install chromium`, a
 alternativa é **delegar para uma VM Linux** por SSH.
 
-`webget` sai com **código 3** quando o conteúdo vem vazio (página JS): é o sinal
-para subir para o nível 2. Anti-bot forte (Cloudflare) e mídia (use `yt-dlp`) não
+`webget` sai com **código 3** só quando o conteúdo vem **realmente vazio** — e
+apenas nos modos que leem conteúdo: uma página **sem links** não dispara o 3 no
+modo `--links` (corrigido; antes sugeria subir de nível sem motivo). Anti-bot forte (Cloudflare) e mídia (use `yt-dlp`) não
 se resolvem com navegador.
 
 ### Regra para sites que consomem cota de sessão
