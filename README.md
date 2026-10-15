@@ -1,5 +1,9 @@
 # docker-termux — Docker num Android sem root
 
+> **O que dá e o que não dá, medido no aparelho:** [`CAPACIDADES.md`](CAPACIDADES.md) —
+> capacidades verificadas, limites com causa raiz, o que é teoricamente possível e o
+> que já existia antes (créditos).
+
 > **English version below (scroll down).**
 
 Relato de campo: como fazer `docker` funcionar num celular Android sem root, sem
