@@ -37,9 +37,14 @@ daemon_ok() {
     fi
 }
 export DOCKER_BUILDKIT=0          # o udockerd fala o builder classico, nao BuildKit
-CLI="$HOME/docker-termux/bin/docker"
-DIRETO="$HOME/.hermes/bin/docker-direct"
-DAEMON_UP="$HOME/.hermes/bin/docker-daemon-up"
+# DOCKER_TERMUX_HOME: runtime (CLI oficial, venv, udocker); DOCKER_TERMUX_BIN:
+# onde estao os scripts irmaos. Os padroes sao os do Hermes (~/.hermes/bin); sem
+# DOCKER_TERMUX_BIN, vale a pasta deste proprio script (roda do clone tambem).
+BASE="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}"
+MEUBIN="${DOCKER_TERMUX_BIN:-$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")}"
+CLI="$BASE/bin/docker"
+DIRETO="$MEUBIN/docker-direct"
+DAEMON_UP="$MEUBIN/docker-daemon-up"
 
 # --- imagem ausente? puxa pelo motor direto --------------------------------
 # O daemon NAO consegue puxar imagem: a lib do udocker detecta a plataforma como
@@ -48,27 +53,70 @@ DAEMON_UP="$HOME/.hermes/bin/docker-daemon-up"
 # puxa com --platform=linux/arm64 e o daemon enxerga a imagem depois (mesmo
 # ~/.udocker). Sem isto, `docker run` de imagem nova e `docker build` cujo FROM
 # nao esta local falham com mensagem enganosa.
-flags_com_valor="-v --volume -e --env -p --publish -w --workdir -u --user \
---name --entrypoint --dns --platform --network --label --mount --add-host \
--m --memory -c --cpus --pid --ipc --ulimit --device --env-file --pull"
+# Flags do `docker run`/`create` que CONSOMEM o proximo token. Fora desta lista,
+# uma flag e booleana. Mesma tabela do docker-direct (FLAGS_COM_VALOR la).
+flags_com_valor=" -a --attach --add-host --annotation --blkio-weight
+--blkio-weight-device --cap-add --cap-drop --cgroup-parent --cgroupns --cidfile
+--cpu-period --cpu-quota --cpu-rt-period --cpu-rt-runtime -c --cpu-shares --cpus
+--cpuset-cpus --cpuset-mems --detach-keys --device --device-cgroup-rule
+--device-read-bps --device-read-iops --device-write-bps --device-write-iops
+--dns --dns-option --dns-search --domainname --entrypoint -e --env --env-file
+--expose --gpus --group-add --health-cmd --health-interval --health-retries
+--health-start-interval --health-start-period --health-timeout -h --hostname
+--ip --ip6 --ipc --isolation --kernel-memory -l --label --label-file --link
+--link-local-ip --log-driver --log-opt --mac-address -m --memory
+--memory-reservation --memory-swap --memory-swappiness --mount --name --network
+--net --network-alias --oom-score-adj --pid --pids-limit --platform -p --publish
+--pull --restart --runtime --security-opt --shm-size --stop-signal
+--stop-timeout --storage-opt --sysctl --tmpfs -u --user --userns --uts -v
+--volume --volume-driver --volumes-from -w --workdir "
+flags_com_valor="$(printf '%s' "$flags_com_valor" | tr '\n' ' ') "
+curtas_com_valor="acehlmpuvw"     # -a -c -e -h -l -m -p -u -v -w
 
-achar_imagem() {   # imprime o primeiro argumento que nao e flag nem valor de flag
-    local pular=0 a
+# Le os argumentos de `run`/`create` ATE a imagem (o que vem depois e o comando
+# do container: em `docker run alpine date -d @0` o -d nao e do docker).
+# Preenche:
+#   IMG        a imagem (primeiro token que nao e flag nem valor de flag)
+#   TEM_D      1 se ha -d/--detach      TEM_T  1 se ha -t/--tty
+#   TEM_BIND   descricao do bind (-v/--volume/--mount), vazio se nao ha
+#   PLATAFORMA valor de --platform (nas formas --platform=X e --platform X)
+analisar_run() {
+    IMG=""; TEM_D=0; TEM_T=0; TEM_BIND=""; PLATAFORMA=""
+    local pular="" fim=0 a resto c
     for a in "$@"; do
-        if [ "$pular" = 1 ]; then pular=0; continue; fi
+        if [ -n "$pular" ]; then
+            [ "$pular" = "--platform" ] && PLATAFORMA="$a"
+            pular=""; continue
+        fi
+        if [ "$fim" = 1 ]; then IMG="$a"; return 0; fi
         case "$a" in
-            --*=*|-*=|--*" "*) continue ;;
-        esac
-        local v
-        for v in $flags_com_valor; do
-            [ "$a" = "$v" ] && { pular=1; continue 2; }
-        done
-        case "$a" in
-            -*) continue ;;             # flag simples
-            *)  printf '%s' "$a"; return 0 ;;
+            --) fim=1 ;;
+            --detach|--detach=[tT1]*) TEM_D=1 ;;
+            --tty|--tty=[tT1]*)       TEM_T=1 ;;
+            --volume|--mount)         TEM_BIND="bind ($a)"; pular="$a" ;;
+            --volume=*|--mount=*)     TEM_BIND="bind (${a%%=*})" ;;
+            --platform=*)             PLATAFORMA="${a#*=}" ;;
+            --*=*) ;;
+            --*) case "$flags_com_valor" in *" $a "*) pular="$a" ;; esac ;;
+            -?*)
+                # cluster curto: -d, -dit, -it, -e X, -eX=1, -v/a:/b ...
+                # uma letra que leva valor encerra o cluster (o resto e o valor)
+                resto="${a#-}"
+                while [ -n "$resto" ]; do
+                    c="${resto:0:1}"; resto="${resto:1}"
+                    case "$c" in d) TEM_D=1 ;; t) TEM_T=1 ;; esac
+                    case "$curtas_com_valor" in
+                        *"$c"*)
+                            [ "$c" = v ] && TEM_BIND="bind (-v)"
+                            [ -z "$resto" ] && pular="-$c"
+                            break ;;
+                    esac
+                done
+                ;;
+            *) IMG="$a"; return 0 ;;
         esac
     done
-    return 1
+    return 0
 }
 
 tem_imagem() { "$CLI" image inspect "$1" >/dev/null 2>&1; }
@@ -85,21 +133,76 @@ garantir_imagem() {
 }
 
 from_do_dockerfile() {   # le o contexto e imprime as imagens base do FROM
-    local ctx="." arq="" a pular=0 ultimo=""
+    # flags de `docker build` que consomem o proximo token: sem a lista,
+    # `build . -t tag` tomava `tag` como contexto
+    local com_valor=" -f --file -t --tag --build-arg --label --target --platform
+        --network --add-host --cache-from --iidfile --isolation --cpu-period
+        --cpu-quota -c --cpu-shares --cpuset-cpus --cpuset-mems -m --memory
+        --memory-swap --shm-size --ulimit --progress --secret --ssh -o --output
+        --cgroup-parent --security-opt "
+    com_valor="$(printf '%s' "$com_valor" | tr -s ' \n' '  ') "
+    local ctx="" arq="" a pular="" nome
+    local -A valores=() estagios=()
     for a in "$@"; do
-        if [ "$pular" = 1 ]; then arq="$a"; pular=0; continue; fi
+        if [ -n "$pular" ]; then
+            case "$pular" in
+                -f|--file) arq="$a" ;;
+                --build-arg)
+                    nome="${a%%=*}"
+                    if [[ "$a" == *=* ]]; then valores[$nome]="${a#*=}"
+                    elif [ -n "${!nome+x}" ]; then valores[$nome]="${!nome}"; fi ;;
+            esac
+            pular=""; continue
+        fi
         case "$a" in
-            -f|--file) pular=1 ;;
-            # -*) cobre --x=y, --flag e -f: listar os especificos antes seria
-            # redundante (o shellcheck acusa SC2221/SC2222 e nao muda nada).
-            -*) continue ;;
-            *) ultimo="$a" ;;
+            --file=*) arq="${a#*=}" ;;
+            --build-arg=*)
+                a="${a#*=}"; nome="${a%%=*}"
+                [[ "$a" == *=* ]] && valores[$nome]="${a#*=}" ;;
+            --*=*) ;;
+            -*) case "$com_valor" in *" $a "*) pular="$a" ;; esac ;;
+            *) [ -z "$ctx" ] && ctx="$a" ;;
         esac
     done
-    [ -n "$ultimo" ] && ctx="$ultimo"
+    [ -z "$ctx" ] && ctx="."
     [ -z "$arq" ] && arq="$ctx/Dockerfile"
     [ -f "$arq" ] || return 0
-    awk 'tolower($1)=="from" {print $2}' "$arq" | grep -v '^$'
+    # ARG antes do 1o FROM da o default (--build-arg vence); FROM pode ter
+    # --platform=... antes da imagem e `AS estagio` depois. FROM <estagio>
+    # aponta para um estagio anterior, nao para o Hub.
+    local tipo x y img k
+    while read -r tipo x y; do
+        case "$tipo" in
+            ARG)
+                nome="${x%%=*}"
+                if [[ "$x" == *=* ]] && [ -z "${valores[$nome]+x}" ]; then
+                    valores[$nome]="${x#*=}"
+                fi ;;
+            FROM)
+                img="$x"
+                for k in "${!valores[@]}"; do
+                    img="${img//\$\{$k\}/${valores[$k]}}"
+                    img="${img//\$$k/${valores[$k]}}"
+                done
+                if [ -n "${estagios[$img]+x}" ]; then
+                    :
+                elif [[ "$img" == *'$'* ]]; then
+                    echo "aviso: FROM $x depende de ARG sem valor — base nao pre-puxada" >&2
+                else
+                    printf '%s\n' "$img"
+                fi
+                [ -n "$y" ] && estagios[$y]=1 ;;
+        esac
+    done < <(awk '
+        /^[[:space:]]*#/ { next }
+        { c = toupper($1) }
+        c == "ARG" && !from { print "ARG", $2; next }
+        c == "FROM" {
+            from = 1; i = 2
+            while ($i ~ /^--/) i++
+            alias = (toupper($(i + 1)) == "AS") ? $(i + 2) : ""
+            print "FROM", $i, alias
+        }' "$arq")
 }
 
 case "${1:-}" in
@@ -124,7 +227,7 @@ case "${1:-}" in
     daemon)
         case "${2:-status}" in
             up)     bash "$DAEMON_UP" && echo "daemon no ar em $DOCKER_HOST" ;;
-            down)   bash "$HOME/.hermes/bin/docker-daemon-down" ;;
+            down)   bash "$MEUBIN/docker-daemon-down" ;;
             *)      daemon_ok \
                         && echo "daemon no ar em $DOCKER_HOST" \
                         || echo "daemon parado" ;;
@@ -145,18 +248,10 @@ fi
 # O Docker real nao precisa disso, entao em `run -d` sem -t inserimos -t e
 # avisamos, para `docker logs` funcionar como o usuario espera.
 if [ "${1:-}" = "run" ]; then
-    tem_d=0; tem_t=0
-    for a in "$@"; do
-        case "$a" in
-            --detach) tem_d=1 ;;
-            --tty)    tem_t=1 ;;
-            -*) # flags curtas agrupadas: -d, -dt, -dit, -it ...
-                case "$a" in -*d*) tem_d=1 ;; esac
-                case "$a" in --*) ;; *t*) tem_t=1 ;; esac
-                ;;
-        esac
-    done
-    if [ "$tem_d" = 1 ] && [ "$tem_t" = 0 ]; then
+    # so as flags ANTES da imagem contam: `--workdir`, `--read-only`, `--dns` ou
+    # o `date -d @0` do comando do container nao sao -d. Ver analisar_run.
+    analisar_run "${@:2}"
+    if [ "$TEM_D" = 1 ] && [ "$TEM_T" = 0 ]; then
         novos=("run" "-t")
         for a in "${@:2}"; do novos+=("$a"); done
         set -- "${novos[@]}"
@@ -167,7 +262,7 @@ fi
 # O supervisor (binario C em ~/.udockerd) evita processos orfaos quando o daemon
 # sai; se faltar (cache limpo, upgrade), compila aqui.
 if ! ls "$HOME"/.udockerd/udockerd-supervisor-* >/dev/null 2>&1; then
-    "$HOME/docker-termux/venv-udockerd/bin/python" -c \
+    "$BASE/venv-udockerd/bin/python" -c \
         "from udockerd.supervisor import ensure_supervisor; ensure_supervisor()" \
         >/dev/null 2>&1 || true
 fi
@@ -185,24 +280,19 @@ case "${1:-}" in
         #  b) --platform de OUTRA arquitetura: o bind -v /linkerconfig (que
         #     silencia o aviso do linker do Android no qemu) depende de bind, e o
         #     daemon nao faz binds.
-        precisa_direto=""
-        for a in "${@:2}"; do
-            case "$a" in
-                -v|--volume|--mount) precisa_direto="bind (-v)" ;;
-                --platform=*)
-                    case "$a" in
-                        *arm64|*aarch64) ;;
-                        *) precisa_direto="cross-arch ($a)" ;;
-                    esac ;;
-                --*) ;;
-                -*) case "$a" in *v*) precisa_direto="bind (-v)" ;; esac ;;
+        analisar_run "${@:2}"
+        precisa_direto="$TEM_BIND"
+        if [ -n "$PLATAFORMA" ]; then
+            case "$PLATAFORMA" in
+                *arm64*|*aarch64*) ;;
+                *) precisa_direto="cross-arch (--platform $PLATAFORMA)" ;;
             esac
-        done
+        fi
         if [ -n "$precisa_direto" ]; then
             echo "aviso: $precisa_direto exige o motor direto; usando modo direto" >&2
             exec "$DIRETO" "$@"
         fi
-        img=$(achar_imagem "${@:2}" || true)
+        img="$IMG"
         garantir_imagem "$img" || true
         ;;
     build)
@@ -220,8 +310,8 @@ esac
 # interfaces — e o motor e o mesmo (~/.udocker), entao o estado e compartilhado.
 case "${1:-}" in
     verify|protect|unprotect|mkrepo|setup|name|rmname|clone)
-        UD_OFICIAL="${UDOCKER_BIN:-$PREFIX/bin/udocker}"
-        [ -x "$UD_OFICIAL" ] || UD_OFICIAL="$HOME/docker-termux/udocker-1.3.17/udocker/udocker"
+        UD_OFICIAL="${UDOCKER_BIN:-${PREFIX:-/data/data/com.termux/files/usr}/bin/udocker}"
+        [ -x "$UD_OFICIAL" ] || UD_OFICIAL="$BASE/udocker-${UDOCKER_VERSAO:-1.3.17}/udocker/udocker"
         if [ ! -x "$UD_OFICIAL" ]; then
             echo "erro: udocker nao encontrado (instale com: pkg install udocker)" >&2
             exit 2
