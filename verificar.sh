@@ -30,6 +30,26 @@ echo " VERIFICACAO DO STACK — $(date '+%d/%m/%Y %H:%M')"
 echo " aparelho: $(uname -m) | kernel: $(uname -r | cut -d- -f1)"
 echo "=============================================================="
 
+# Retrato do que JA existia antes de comecar. O navegador persistente do Hermes
+# (`chrome-cdp`, motor do browser_exec) fica no ar por projeto — com perfil e aba
+# proprios — e nao e orfao de ninguem. O teste do fim mede o que ESTE script
+# deixar de novo, e nao o que ja estava rodando.
+PIDS_ANTES=$(python3 - <<'PY'
+import os
+pids = []
+for p in os.listdir('/proc'):
+    if not p.isdigit():
+        continue
+    try:
+        e = os.readlink(f'/proc/{p}/exe')
+    except OSError:
+        continue
+    if 'chromium' in e or e.endswith('/chrome') or 'udockerd' in e:
+        pids.append(p)
+print(' '.join(pids))
+PY
+)
+
 echo
 echo "--- 1. motor de containers -----------------------------------"
 if curl -s --max-time 5 http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
@@ -144,12 +164,13 @@ fi
 
 echo
 echo "--- 7. checagem de saude do sistema --------------------------"
-orfaos=$(python3 - <<'PY'
-import os
+orfaos=$(python3 - "$PIDS_ANTES" <<'PY'
+import os, sys
+antes = set(sys.argv[1].split()) if len(sys.argv) > 1 else set()
 n = 0
 for p in os.listdir('/proc'):
-    if not p.isdigit():
-        continue
+    if not p.isdigit() or p in antes:
+        continue          # ja rodava antes: nao e lixo que ESTE script deixou
     try:
         exe = os.readlink(f'/proc/{p}/exe')
     except OSError:

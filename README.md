@@ -42,7 +42,7 @@ and executed inside Termux, on the phone alone, without root.
 | **`webcdp`** | level 3 — raw CDP (**no Selenium**): text, JS, screenshot |
 | **`webplay`** | level 3b — Selenium + chromedriver, for those who want the familiar API |
 | **`pdf` / `pdfpy`** | Markdown → typeset PDF; PDF helpers in a container |
-| **`verificar.sh`** | **the proof**: 16 items, 0 failures, ~1 min, read-only |
+| **`verificar.sh`** | **the proof**: 16 items, ~2 min; it changes state (daemon, images, containers) |
 
 ---
 
@@ -390,7 +390,7 @@ to fixes — everything executed inside the device, in a terminal.
 
 | path | what it is |
 |---|---|
-| `verificar.sh` | **the battery that proves the whole stack** (16 items, ~1 min, changes nothing) |
+| `verificar.sh` | **the battery that proves the whole stack** (16 items, ~2 min; it starts the daemon, pulls images and runs containers) |
 | `scripts/` | the `docker` dispatcher, the direct engine, the daemon lifecycle and the installer |
 | `ferramentas/` | `pdf`, `pdfpy`, `webget`, `webprint`, `webcdp`, `webplay` and the `webauto.py` helper |
 | `imagens/` | Dockerfiles **and the original sources** (`md2pdf`, `webget.py`, `webprint.py`) |
