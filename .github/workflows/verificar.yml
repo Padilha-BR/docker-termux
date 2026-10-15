@@ -16,16 +16,28 @@ name: verificar
 
 on:
   # qualquer branch: assim o guarda roda tambem em branch de trabalho (e da para
-  # provar que ele reprova, reintroduzindo o bug num branch descartavel).
+  # provar que ele reprova, reintroduzindo o bug num branch descartavel). Num PR
+  # isso roda duas vezes (push + pull_request) de proposito: o push cobre branch
+  # sem PR. O `concurrency` abaixo so cancela rodada superada no MESMO ref.
   push:
   pull_request:
   workflow_dispatch:
 
+# o guarda so le o repo: nenhum passo precisa escrever nada no GitHub
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   guarda:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      # pin por SHA (tag v4 = v4.4.0): uma tag pode ser movida, o SHA nao
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Listar os scripts shell do repo
         run: |
@@ -60,9 +72,18 @@ jobs:
           # `comando` dentro de aspas duplas vira expansao de comando. Foi assim
           # que a dica de `-t` passou a rodar `docker logs` sozinha em cada
           # `run -d`. Aqui isso quebra o build, com o arquivo e a linha.
+          # Sem `2>/dev/null || true`: se o shellcheck nao rodar (ausente, arquivo
+          # ilegivel, erro de parse), o passo REPROVA em vez de ficar verde mudo.
+          # O shellcheck sai com 1 quando acha QUALQUER aviso de estilo; por isso
+          # o codigo de saida dele e lido a parte (so > 1 e falha da ferramenta).
           falhou=0
           while IFS= read -r f; do
-            saida=$(shellcheck -S style -f gcc "$f" 2>/dev/null | grep "SC2006" || true)
+            rc=0
+            relatorio=$(shellcheck -S style -f gcc "$f") || rc=$?
+            if [ "$rc" -gt 1 ]; then
+              echo "ERRO: shellcheck nao conseguiu analisar $f (rc=$rc)"; falhou=1; continue
+            fi
+            saida=$(printf '%s\n' "$relatorio" | grep "SC2006" || true)
             if [ -n "$saida" ]; then echo "$saida"; falhou=1; fi
           done < "$RUNNER_TEMP/scripts.txt"
           [ "$falhou" -eq 0 ] && echo "nenhum backtick perigoso"
@@ -70,14 +91,22 @@ jobs:
 
       - name: Python compila
         run: |
+          # Process substitution, NAO pipe: com `git ls-files | while` o laco roda
+          # num subshell, o `falhou=1` morre com ele e o `exit` sempre via 0.
+          # Entram os *.py (inclusive os sem shebang, como webauto.py e cena.py)
+          # e os scripts sem extensao cuja PRIMEIRA linha e shebang python
+          # (docker-direct, md2pdf, udockerd-unix).
           falhou=0
-          git ls-files | while IFS= read -r f; do
-            head -1 "$f" 2>/dev/null | grep -qE '^#!.*python' || continue
+          while IFS= read -r f; do
             if python3 -m py_compile "$f" 2>/dev/null; then echo "ok   $f"; else
               echo "ERRO ao compilar $f"; python3 -m py_compile "$f"; falhou=1
             fi
-          done
+          done < <( { git ls-files '*.py'
+                      git ls-files ':!*.py' | while IFS= read -r g; do
+                        head -1 "$g" 2>/dev/null | grep -qE '^#!.*python' && echo "$g"
+                      done; } | sort -u)
           exit $falhou
 
       - name: Testes unitarios do motor direto
-        run: python3 testes/teste-docker-direct.py
+        # roda de um diretorio temporario: o teste nao pode depender do cwd
+        run: cd "$RUNNER_TEMP" && python3 "$GITHUB_WORKSPACE/testes/teste-docker-direct.py"
