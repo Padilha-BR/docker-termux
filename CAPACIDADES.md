@@ -168,6 +168,29 @@ servem para ambos (e o `udocker` oficial pode ficar instalado junto).
 Some-se que a CLI lista uns 45 comandos, mas **só os que o daemon implementa
 funcionam de fato** — o resto existe na ajuda e falha na execução.
 
+### 3.5.2 Ponho as duas para conversar? Sim — está implementado e testado
+
+Duas pontes de uma linha cada, nas duas direções:
+
+| você digita | vai para | por quê |
+|---|---|---|
+| `docker verify/protect/unprotect/mkrepo/setup/name/rmname/clone` | udocker | a API do Docker não tem esses comandos |
+| `udocker build/exec/logs/compose` | `docker` do repo (daemon) | o udocker não tem esses |
+| qualquer outro `docker …` | CLI oficial → daemon | comportamento normal |
+| qualquer outro `udocker …` | udocker oficial | idem |
+
+**Por que é seguro:** o daemon **não** passa pela ponte. O `udockerd` importa a lib
+do udocker em Python (`from udocker.container.structure import ContainerStructure`),
+nunca o binário do PATH — então sobrescrever `udocker` pelo wrapper não toca no que
+já funcionava. Verificado depois de instalar as duas pontes:
+`docker run --rm alpine echo ok` respondeu, `docker setup --help` chegou ao udocker
+e `udocker build --help` chegou ao Docker.
+
+**Custo honesto:** o wrapper fica no PATH **antes** do binário oficial, então
+scripts de terceiros que chamam `udocker` passam por ele. É transparente (repassa
+tudo o que não é `build`/`exec`/`logs`), mas é mais uma peça para dar errado — e
+`UDOCKER_REAL` existe para apontar a outro binário.
+
 **Conclusão honesta:** se você só quer **executar** imagens, `pkg install udocker`
 resolve — e resolve sozinho três dos cinco defeitos que este repositório documenta
 (a caçada aqui só foi necessária porque partimos de um tarball próprio). O que o

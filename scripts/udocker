@@ -1,0 +1,36 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# udocker — ponte entre as duas interfaces (o caminho inverso do `docker`).
+#
+# O udocker nao tem `build`, `exec` nem `logs`; o `docker` deste repo tem (via
+# daemon). Este wrapper mantem a interface do udocker e delega esses comandos ao
+# `docker`, de modo que os DOIS comandos cobrem as duas interfaces.
+#
+# Tudo o mais segue intacto para o udocker OFICIAL (que fica em $PREFIX/bin),
+# porque o motor e o mesmo (~/.udocker) e o estado e compartilhado.
+#
+# Seguranca desta ponte: o daemon (udockerd) NAO passa por aqui — ele importa a
+# lib do udocker em Python (from udocker.container.structure import ...), nunca o
+# binario do PATH. Entao sombrear `udocker` nao afeta o que ja funciona.
+#
+# UDOCKER_REAL permite apontar para outro binario (ex.: o do tarball do repo).
+set -uo pipefail
+
+REAL="${UDOCKER_REAL:-$PREFIX/bin/udocker}"
+DISPATCHER="$HOME/.hermes/bin/docker"
+
+case "${1:-}" in
+    build|exec|logs|compose)
+        if [ ! -x "$DISPATCHER" ]; then
+            printf 'erro: %s nao encontrado\n' "$DISPATCHER" >&2
+            exit 2
+        fi
+        printf "nota: '%s' nao existe no udocker; usando o Docker (daemon) do repo\n" "$1" >&2
+        exec "$DISPATCHER" "$@"
+        ;;
+esac
+
+if [ ! -x "$REAL" ]; then
+    printf 'erro: udocker nao encontrado em %s (instale com: pkg install udocker)\n' "$REAL" >&2
+    exit 2
+fi
+exec "$REAL" "$@"

@@ -193,4 +193,21 @@ case "${1:-}" in
         ;;
 esac
 
+# --- comandos que SO o udocker tem -----------------------------------------
+# A API do Docker nao conhece verify/protect/unprotect/mkrepo/setup/name/rmname/
+# clone. Roteando para o udocker, um comando so ('docker') cobre as DUAS
+# interfaces — e o motor e o mesmo (~/.udocker), entao o estado e compartilhado.
+case "${1:-}" in
+    verify|protect|unprotect|mkrepo|setup|name|rmname|clone)
+        UD_OFICIAL="${UDOCKER_BIN:-$PREFIX/bin/udocker}"
+        [ -x "$UD_OFICIAL" ] || UD_OFICIAL="$HOME/docker-termux/udocker-1.3.17/udocker/udocker"
+        if [ ! -x "$UD_OFICIAL" ]; then
+            echo "erro: udocker nao encontrado (instale com: pkg install udocker)" >&2
+            exit 2
+        fi
+        echo "nota: '$1' e comando nativo do udocker (nao existe na API do Docker) — repassando" >&2
+        exec "$UD_OFICIAL" "$@"
+        ;;
+esac
+
 exec "$CLI" "$@"
