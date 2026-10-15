@@ -4,7 +4,8 @@
 # Duas camadas, escolhidas automaticamente:
 #
 #  1) PADRAO: CLI oficial do Docker (binario estatico) falando com o daemon
-#     udockerd em tcp://127.0.0.1:2375, que implementa a API do Docker
+#     udockerd num socket Unix (unix://~/.udockerd/docker.sock, modo 0600), que
+#     implementa a API do Docker
 #     (run/exec/logs/TTY/build) dirigindo o udocker + proot 5.1.
 #     Da tudo que se espera de `docker`: build, exec, logs, comando em
 #     container vivo, imagem de outra arquitetura por qemu.
@@ -15,8 +16,26 @@
 # Comandos de diagnostico (doctor, dns-fix, info) sao sempre atendidos pela
 # camada direta, que e quem sabe inspecionar o motor.
 
-export DOCKER_HOST="tcp://127.0.0.1:${DOCKER_DAEMON_PORT:-2375}"
-API_HTTP="http://127.0.0.1:${DOCKER_DAEMON_PORT:-2375}"   # curl fala http, nao tcp
+# TRANSPORTE: socket Unix (modo 0600) em vez de TCP no loopback.
+# A API do Docker nao autentica ninguem e, no Android, qualquer app com permissao
+# de rede alcanca 127.0.0.1 — pelo TCP, um app de terceiro poderia rodar container
+# e montar volume do Termux. O socket Unix so o dono abre (permissao de arquivo).
+# DOCKER_DAEMON_TCP=1 volta ao comportamento antigo (tcp://127.0.0.1:2375).
+SOCKET="${UDOCKERD_SOCKET:-$HOME/.udockerd/docker.sock}"
+if [ "${DOCKER_DAEMON_TCP:-0}" = 1 ]; then
+    export DOCKER_HOST="tcp://127.0.0.1:${DOCKER_DAEMON_PORT:-2375}"
+else
+    export DOCKER_HOST="unix://$SOCKET"
+fi
+
+# o daemon responde? (curl: http sobre o socket, ou http direto no modo TCP)
+daemon_ok() {
+    if [ "${DOCKER_DAEMON_TCP:-0}" = 1 ]; then
+        curl -s -m 2 "http://127.0.0.1:${DOCKER_DAEMON_PORT:-2375}/_ping" 2>/dev/null | grep -q OK
+    else
+        curl -s -m 2 --unix-socket "$SOCKET" "http://localhost/_ping" 2>/dev/null | grep -q OK
+    fi
+}
 export DOCKER_BUILDKIT=0          # o udockerd fala o builder classico, nao BuildKit
 CLI="$HOME/docker-termux/bin/docker"
 DIRETO="$HOME/.hermes/bin/docker-direct"
@@ -88,7 +107,7 @@ case "${1:-}" in
         "$DIRETO" doctor || true
         echo
         echo "=== daemon (API do Docker em userspace) ==="
-        if curl -s -m 2 "$API_HTTP/_ping" 2>/dev/null | grep -q OK; then
+        if daemon_ok; then
             echo "  [OK  ] udockerd respondendo em $DOCKER_HOST"
             "$CLI" version --format '  CLI {{.Client.Version}} | daemon {{.Server.Version}}' 2>/dev/null
         else
@@ -106,7 +125,7 @@ case "${1:-}" in
         case "${2:-status}" in
             up)     bash "$DAEMON_UP" && echo "daemon no ar em $DOCKER_HOST" ;;
             down)   bash "$HOME/.hermes/bin/docker-daemon-down" ;;
-            *)      curl -s -m 2 "$API_HTTP/_ping" >/dev/null 2>&1 \
+            *)      daemon_ok \
                         && echo "daemon no ar em $DOCKER_HOST" \
                         || echo "daemon parado" ;;
         esac

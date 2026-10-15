@@ -54,5 +54,10 @@ the device afterwards.
 5. A **write-up of pitfalls** that cost hours and are not documented anywhere: `-v ...:ro`
    failing silently, the wrapper that dies leaving Chromium orphaned, force-killed
    containers piling up 10.6 GB, and `pkill -f udockerd` killing its own shell.
+6. A **Unix-socket transport for the daemon**: the Docker API has no authentication, and on
+   Android the loopback is reachable by any app with network permission — so the daemon
+   moved off TCP and behind a `0600` socket.
+7. **Pinned artifact hashes**: the installer aborts on a download that doesn't match
+   [`checksums.txt`](checksums.txt), since neither upstream publishes a `.sha256`.
 
 Details in [`CAPACIDADES.md`](CAPACIDADES.md).

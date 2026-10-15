@@ -34,9 +34,20 @@ if kill -0 "$pid" 2>/dev/null; then
 fi
 
 rm -f "$PIDFILE"
-if curl -s -m 2 "http://127.0.0.1:$PORTA/_ping" >/dev/null 2>&1; then
-    echo "aviso: algo ainda responde na porta $PORTA" >&2
-    exit 1
+SOCKET="${UDOCKERD_SOCKET:-$HOME/.udockerd/docker.sock}"
+TCP="${DOCKER_DAEMON_TCP:-0}"
+if [ "$TCP" = 1 ]; then
+    if curl -s -m 2 "http://127.0.0.1:$PORTA/_ping" >/dev/null 2>&1; then
+        echo "aviso: algo ainda responde na porta $PORTA" >&2
+        exit 1
+    fi
+else
+    if curl -s -m 2 --unix-socket "$SOCKET" http://localhost/_ping >/dev/null 2>&1; then
+        echo "aviso: algo ainda responde no socket $SOCKET" >&2
+        exit 1
+    fi
+    # socket de daemon morto: sem remover, o proximo bind falha com "address in use"
+    rm -f "$SOCKET" 2>/dev/null || true
 fi
 # o wake-lock e tomado no docker-daemon-up e ninguem devolvia: depois do
 # primeiro comando `docker` o aparelho nunca mais dormia

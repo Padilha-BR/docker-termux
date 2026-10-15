@@ -28,6 +28,7 @@ Where something was not tested, it says **"not tested"**.
 | `pip` inside the container | ✅ | including Python 3.12 on Alpine |
 | Persistence between runs | ✅ | images and containers live in `~/.udocker` |
 | Official Docker CLI talking to the daemon | ✅ | API 1.41 |
+| Daemon transport | ✅ | **Unix socket, mode 0600** (`unix://~/.udockerd/docker.sock`) — not TCP; see §2.7 |
 | `proot-distro` (full distro, no daemon) | ✅ | the more direct alternative for "I want a Linux" |
 
 ### 1.2 What actually ran here (proof, not promises)
@@ -112,6 +113,24 @@ containers (proot does not run systemd).
   containers = **10.6 GB** sitting there.
 - **`-v` does not accept `:ro`** in udocker: the suffix becomes part of the filename and
   the mount fails **silently**.
+
+### 2.7 TCP on the loopback: the exposure that was removed
+
+The Docker API has no authentication. On a multi-user server that is acceptable, because the
+loopback is already restricted — **on Android it is not**. Any app holding the INTERNET
+permission can open `127.0.0.1:2375` and talk to the daemon: run a container with your home
+mounted, read and write your files, exec inside a container.
+
+Not theoretical: with the old transport, `curl 127.0.0.1:2375/_ping` answered from any
+process on the device.
+
+**Fixed the way real Docker does it:** the daemon listens on a Unix socket
+(`unix://$HOME/.udockerd/docker.sock`, mode `0600` inside a `0700` directory), so access is
+decided by file permission instead of network reachability. `udockerd` only speaks TCP, so
+[`scripts/udockerd-unix`](scripts/udockerd-unix) serves its **own handler and routes** over
+`AF_UNIX` — the package's HTTP server class is simply swapped for a Unix one. Measured:
+`docker run` through the socket works, the socket is `0600`, and `127.0.0.1:2375` stops
+answering. A legacy TCP daemon still running is detected and stopped by `docker daemon up`.
 
 ---
 
@@ -340,6 +359,12 @@ This work did **not invent** the concept. What it does is integrate, fix and mea
 6. **A field report of the traps** that cost hours: `-v ...:ro` failing silently, orphan
    containers eating 10.6 GB, `pkill -f udockerd` killing your own shell, and the wrapper
    that dies leaving Chromium hanging as an orphan.
+7. **A Unix-socket transport for the daemon** ([`scripts/udockerd-unix`](scripts/udockerd-unix)):
+   the same handler and routes over `AF_UNIX`, socket in mode `0600` — closing the
+   unauthenticated-TCP exposure that the Android loopback leaves open.
+8. **Pinned artifact hashes** ([`checksums.txt`](checksums.txt) plus a hash check in the
+   installer): neither upstream publishes a `.sha256` for these artifacts, so the hashes are
+   pinned here and a mismatched download **aborts** the installation.
 
 ---
 

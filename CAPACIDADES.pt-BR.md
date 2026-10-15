@@ -28,6 +28,7 @@ Onde algo não foi testado, está escrito **"não testado"**.
 | `pip` dentro do container | ✅ | inclusive Python 3.12 no Alpine |
 | Persistência entre execuções | ✅ | imagens e containers ficam em `~/.udocker` |
 | CLI oficial do Docker falando com o daemon | ✅ | API 1.41 |
+| Transporte do daemon | ✅ | **socket Unix, modo 0600** (`unix://~/.udockerd/docker.sock`) — não TCP; veja a §2.7 |
 | `proot-distro` (distro completa, sem daemon) | ✅ | alternativa mais direta para "quero um Linux" |
 
 ### 1.2 O que já rodou de verdade aqui (provas, não promessas)
@@ -114,6 +115,25 @@ Sem systemd dentro dos containers (proot não roda systemd).
   containers órfãos = **10,6 GB** parados.
 - **`-v` não aceita `:ro`** no udocker: o sufixo vira parte do nome do arquivo e a
   montagem falha **em silêncio**.
+
+### 2.7 TCP no loopback: a exposição que foi removida
+
+A API do Docker não autentica ninguém. Num servidor multiusuário isso é aceitável, porque o
+loopback já é restrito — **no Android não é**. Qualquer app com a permissão INTERNET abre o
+`127.0.0.1:2375` e conversa com o daemon: roda container com a tua home montada, lê e
+escreve teus arquivos, executa comando dentro do container.
+
+Não é teoria: com o transporte antigo, `curl 127.0.0.1:2375/_ping` respondia de qualquer
+processo do aparelho.
+
+**Corrigido do jeito que o Docker de verdade faz:** o daemon escuta num socket Unix
+(`unix://$HOME/.udockerd/docker.sock`, modo `0600` dentro de uma pasta `0700`), então o
+acesso é decidido por permissão de arquivo, não por alcance de rede. O `udockerd` só fala
+TCP, então o [`scripts/udockerd-unix`](scripts/udockerd-unix) serve **o próprio handler e as
+próprias rotas** dele sobre `AF_UNIX` — a classe de servidor HTTP do pacote é apenas trocada
+por uma Unix. Medido: `docker run` pelo socket funciona, o socket é `0600` e o
+`127.0.0.1:2375` para de responder. Um daemon TCP legado ainda no ar é detectado e
+encerrado pelo `docker daemon up`.
 
 ---
 
@@ -347,6 +367,13 @@ Este trabalho **não inventou** o conceito. O que ele faz é integrar, corrigir 
 6. **Relato de campo das armadilhas** que custam horas: `-v ...:ro` falhando em
    silêncio, containers órfãos comendo 10,6 GB, `pkill -f udockerd` matando a própria
    shell, e o wrapper que morre deixando o Chromium pendurado como órfão.
+7. **Transporte em socket Unix para o daemon**
+   ([`scripts/udockerd-unix`](scripts/udockerd-unix)): o mesmo handler e as mesmas rotas
+   sobre `AF_UNIX`, socket em modo `0600` — fechando a exposição do TCP sem autenticação que
+   o loopback do Android deixa aberta.
+8. **Hashes pinados dos artefatos** ([`checksums.txt`](checksums.txt) mais a checagem no
+   instalador): nenhum dos upstreams publica `.sha256` para esses artefatos, então os hashes
+   ficam pinados aqui e um download diferente **aborta** a instalação.
 
 ---
 

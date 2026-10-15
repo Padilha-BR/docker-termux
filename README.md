@@ -42,7 +42,7 @@ and executed inside Termux, on the phone alone, without root.
 | **`webcdp`** | level 3 — raw CDP (**no Selenium**): text, JS, screenshot |
 | **`webplay`** | level 3b — Selenium + chromedriver, for those who want the familiar API |
 | **`pdf` / `pdfpy`** | Markdown → typeset PDF; PDF helpers in a container |
-| **`verificar.sh`** | **the proof**: 16 items, ~2 min; it changes state (daemon, images, containers) |
+| **`verificar.sh`** | **the proof**: 17 items, ~2 min; it changes state (daemon, images, containers) |
 
 ---
 
@@ -134,6 +134,20 @@ measured against these five defects.
 
 Both really execute through **Termux's proot 5.1** — neither has kernel namespaces.
 
+### Why the daemon listens on a Unix socket
+
+The Docker API has **no authentication**: whoever reaches the endpoint controls the daemon —
+runs containers, mounts a volume of your Termux home, reads your files. On a multi-user
+server the loopback is already restricted; **on Android it is not**, and any app holding
+the INTERNET permission can connect to `127.0.0.1:2375`.
+
+So the daemon speaks over `unix://$HOME/.udockerd/docker.sock` in mode **0600**, inside a
+`0700` directory. `udockerd` only knows TCP, so
+[`scripts/udockerd-unix`](scripts/udockerd-unix) serves **its own handler and routes** over
+`AF_UNIX` — nothing is reimplemented. Verified: `docker run` works through the socket, the
+socket is `0600`, and `127.0.0.1:2375` stops answering. `DOCKER_DAEMON_TCP=1` brings the old
+transport back (not recommended).
+
 ---
 
 ## Install
@@ -149,6 +163,16 @@ bash verificar.sh                 # proves the whole stack (16 items, ~1 min)
 The installer handles: `proot`, `qemu-user-x86-64`, the udocker runtime, the proot shim,
 the qemu patch, the udockerd venv, supervisor compilation, the official CLI download,
 scripts, shortcuts and `resolv.conf`.
+
+Two things worth knowing about those downloads:
+
+- **They are verified.** Neither udocker nor Docker publishes a `.sha256` for these
+  artifacts, so the hashes live in [`checksums.txt`](checksums.txt) and the installer
+  **aborts** if a downloaded file doesn't match (a version without a pin is reported with
+  its hash, never silently accepted). `udockerd` is installed pinned at `==0.3.5`, the
+  version the dispatcher's workarounds were tested against.
+- **The daemon listens on a Unix socket**, not TCP — see "Why the daemon listens on a Unix
+  socket" below.
 
 ---
 
@@ -390,8 +414,9 @@ to fixes — everything executed inside the device, in a terminal.
 
 | path | what it is |
 |---|---|
-| `verificar.sh` | **the battery that proves the whole stack** (16 items, ~2 min; it starts the daemon, pulls images and runs containers) |
-| `scripts/` | the `docker` dispatcher, the direct engine, the daemon lifecycle and the installer |
+| `verificar.sh` | **the battery that proves the whole stack** (17 items, ~2 min; it starts the daemon, pulls images and runs containers) |
+| `scripts/` | the `docker` dispatcher, the direct engine, the daemon lifecycle, `udockerd-unix` (Unix-socket daemon) and the installer |
+| `checksums.txt` | pinned sha256 of the artifacts the installer downloads |
 | `ferramentas/` | `pdf`, `pdfpy`, `webget`, `webprint`, `webcdp`, `webplay` and the `webauto.py` helper |
 | `imagens/` | Dockerfiles **and the original sources** (`md2pdf`, `webget.py`, `webprint.py`) |
 | `testes/` | headless benchmarks (time + RAM) and the PDF test battery |

@@ -52,17 +52,32 @@ PY
 
 echo
 echo "--- 1. motor de containers -----------------------------------"
-if curl -s --max-time 5 http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
-    ok "daemon udockerd responde"
+# O daemon escuta num socket Unix (0600), nao em TCP: no Android qualquer app com
+# permissao de rede alcanca o loopback e a API do Docker nao autentica ninguem.
+SOCKET="${UDOCKERD_SOCKET:-$HOME/.udockerd/docker.sock}"
+daemon_responde() {
+    curl -s --max-time 5 --unix-socket "$SOCKET" http://localhost/_ping 2>/dev/null | grep -q OK
+}
+if daemon_responde; then
+    ok "daemon udockerd responde" "socket 0600"
 else
     echo "  (subindo o daemon...)"
     docker daemon up >/dev/null 2>&1
     sleep 4
-    if curl -s --max-time 5 http://127.0.0.1:2375/_ping >/dev/null 2>&1; then
+    if daemon_responde; then
         ok "daemon udockerd responde" "(subiu agora)"
     else
-        falha "daemon udockerd" "sem resposta em 127.0.0.1:2375"
+        falha "daemon udockerd" "sem resposta em $SOCKET"
     fi
+fi
+
+# O socket e privado? No Android o loopback nao e isolado entre apps, entao a
+# permissao do arquivo E a protecao da API do Docker (que nao autentica ninguem).
+modo_socket=$(stat -c '%a' "$SOCKET" 2>/dev/null || echo "ausente")
+if [ "$modo_socket" = "600" ]; then
+    ok "socket do daemon privado" "modo $modo_socket"
+else
+    falha "socket do daemon" "modo $modo_socket (esperado 600)"
 fi
 
 img_count=$(docker images -q 2>/dev/null | wc -l)
