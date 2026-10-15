@@ -237,8 +237,19 @@ imagem amd64 executando em **1,6 s**; ~370 MB de imagens em disco após os teste
   existem neste modo.
 - **Rede não é isolada:** o container usa a pilha de rede do Termux, então o
   serviço já escuta direto na porta (o `-p` é ignorado de propósito).
-- O daemon `udockerd` 0.3.5 só captura a saída do container principal quando ele
-  tem TTY; o dispatcher insere `-t` automaticamente em `run -d` e avisa.
+- **`docker logs` de container destacado exige TTY** no udockerd 0.3.5: sem
+  `-t`, a saída do processo principal herda o stdout do daemon e `docker logs`
+  volta vazio (o Docker real não precisa disso). Comprovado variando só o `-t`,
+  com a CLI direta e o supervisor já compilado:
+
+  ```sh
+  docker run -d  --name=c1 alpine sh -c "echo SEM-T; sleep 15"; docker logs c1   # vazio
+  docker run -dt --name=c2 alpine sh -c "echo COM-T; sleep 15"; docker logs c2   # COM-T
+  ```
+
+  Por isso o dispatcher insere `-t` em `run -d` e avisa. O supervisor
+  (`~/.udockerd/udockerd-supervisor-*`, compilado pelo instalador) também é
+  necessário para não deixar processos órfãos.
 - `docker run` sem `--rm` acumula containers parados (igual ao Docker real).
 - O Android suspende processos em segundo plano: para serviços longos, garanta a
   bateria sem restrições para o Termux e mantenha wake-lock.

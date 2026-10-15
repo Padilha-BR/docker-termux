@@ -77,9 +77,11 @@ faz sozinho quando a imagem não é da arquitetura do host).
 
 ## Armadilhas que custam tempo
 
-- **`docker logs` precisa de TTY** no daemon 0.3.5: sem `-t` a saída do container
-  principal vai para o log do daemon. O dispatcher insere `-t` em `run -d` e avisa.
-  Logs de `exec` são capturados normalmente (`~/.udockerd/logs/exec/`).
+- **`docker logs` de container destacado exige `-t`** no udockerd 0.3.5: sem TTY a
+  saída herda o stdout do daemon e o log volta vazio. Comprovado variando só o `-t`
+  com a CLI direta (supervisor já compilado): `run -d` -> vazio, `run -dt` -> saída.
+  O dispatcher insere `-t` em `run -d` e avisa. Logs de `exec` ficam em
+  `~/.udockerd/logs/exec/`.
 - **O supervisor do udockerd compila on first use** (`~/.udockerd/udockerd-supervisor-*`);
   precisa de `cc`/`clang`. Sem ele, `docker logs` do container principal fica vazio.
 - **`curl` não entende `tcp://`**: para checar o daemon use

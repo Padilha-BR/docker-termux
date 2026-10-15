@@ -58,10 +58,12 @@ if ! bash "$DAEMON_UP" >/dev/null 2>&1; then
     exec "$DIRETO" "$@"
 fi
 
-# O daemon (v0.3.5) so captura o stdout do container quando ele tem TTY:
-# sem `-t`, a saida do processo vai para o log do daemon e `docker logs` fica
-# vazio. Em `run -d` sem TTY inserimos -t e explicamos, para `docker logs`
-# funcionar como o usuario espera.
+# O daemon so captura o stdout do container quando ele tem TTY. Verificado com
+# a CLI direta variando SO o -t (supervisor ja compilado):
+#   docker run -d   -> `docker logs` vazio (a saida vai para o log do daemon)
+#   docker run -dt  -> `docker logs` devolve a saida
+# O Docker real nao precisa disso, entao em `run -d` sem -t inserimos -t e
+# avisamos, para `docker logs` funcionar como o usuario espera.
 if [ "${1:-}" = "run" ]; then
     tem_d=0; tem_t=0
     for a in "$@"; do
@@ -78,8 +80,16 @@ if [ "${1:-}" = "run" ]; then
         novos=("run" "-t")
         for a in "${@:2}"; do novos+=("$a"); done
         set -- "${novos[@]}"
-        echo "dica: -t adicionado para o daemon capturar a saida (limitação do modo userspace; use docker logs em seguida)" >&2
+        echo "dica: -t adicionado para o daemon capturar a saida (sem ele `docker logs` volta vazio; limitacao do daemon userspace)" >&2
     fi
+fi
+
+# O supervisor (binario C em ~/.udockerd) evita processos orfaos quando o daemon
+# sai; se faltar (cache limpo, upgrade), compila aqui.
+if ! ls "$HOME"/.udockerd/udockerd-supervisor-* >/dev/null 2>&1; then
+    "$HOME/docker-termux/venv-udockerd/bin/python" -c \
+        "from udockerd.supervisor import ensure_supervisor; ensure_supervisor()" \
+        >/dev/null 2>&1 || true
 fi
 
 exec "$CLI" "$@"
