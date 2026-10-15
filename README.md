@@ -313,6 +313,29 @@ quando o HTML já traz o conteúdo, e nunca rode dois Chromiums em paralelo.
 
 ---
 
+## Autoria e como citar
+
+Feito por **Gabriel Padilha** ([@Padilha-BR](https://github.com/Padilha-BR)), do
+trabalho de campo às correções — tudo executado dentro do aparelho, por terminal.
+
+- [`AUTHORS.md`](AUTHORS.md) — o que já existia antes (créditos) e o que é
+  contribuição original deste repositório.
+- [`CITATION.cff`](CITATION.cff) — citação formal (o GitHub mostra o botão
+  *Cite this repository*).
+- [`CAPACIDADES.md`](CAPACIDADES.md) — o que pode, o que não pode e o que é
+  teoricamente possível, com as medições.
+
+### Estrutura
+
+| caminho | o que é |
+|---|---|
+| `scripts/` | o dispatcher `docker`, o motor direto, o ciclo do daemon e o instalador |
+| `ferramentas/` | `pdf`, `pdfpy`, `webget`, `webprint`, `webplay` e o helper `webauto.py` |
+| `imagens/` | Dockerfiles **e as fontes autorais** (`md2pdf`, `webget.py`, `webprint.py`) |
+| `testes/` | benchmarks de headless (tempo + RAM) e a bateria de testes do PDF |
+| `examples/` | exemplos rodando: Manim (vídeo) e automação web (Selenium) |
+| `skills/` | a skill do Hermes que descreve o procedimento |
+
 ## Licença
 
 MIT. Os componentes usados mantêm suas licenças: udocker (GPL-2.0),

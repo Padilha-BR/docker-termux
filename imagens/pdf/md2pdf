@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""md2pdf — Markdown -> PDF com tipografia de documento (roda DENTRO do container).
+
+Uso:
+    md2pdf ENTRADA.md [-o SAIDA.pdf] [--titulo T] [--subtitulo S] [--autor A]
+            [--paper a4|letter] [--margem CM] [--fonte NOME] [--numerar-paginas]
+
+ENTRADA pode ser `-` para ler da entrada padrao.
+Sai com codigo 0 e imprime o caminho do PDF, ou com 2 e uma mensagem clara.
+"""
+from __future__ import annotations
+
+import argparse
+import html
+import os
+import sys
+from pathlib import Path
+
+import markdown
+
+CSS = """
+@page {
+  size: @@PAPER@@;
+  margin: @@MARGEM@@cm 2cm @@MARGEM_RODAPE@@cm 2cm;
+  @bottom-center {
+    content: @@RODAPE@@;
+    font-family: "DejaVu Sans", sans-serif;
+    font-size: 8.5pt;
+    color: #777;
+  }
+}
+* { box-sizing: border-box; }
+html { font-size: 11.5pt; }
+body {
+  font-family: "@@FONTE@@", "DejaVu Sans", "Noto Color Emoji", sans-serif;
+  line-height: 1.55;
+  color: #1a1a1a;
+  hyphens: auto;
+}
+h1, h2, h3, h4 { line-height: 1.25; margin: 1.1em 0 0.45em; color: #111; }
+h1 { font-size: 1.85em; border-bottom: 2px solid #333; padding-bottom: .2em; }
+h2 { font-size: 1.4em; border-bottom: 1px solid #ccc; padding-bottom: .15em; }
+h3 { font-size: 1.15em; }
+header.capa { margin-bottom: 1.6em; }
+header.capa .titulo { font-size: 2.1em; font-weight: 700; margin: 0 0 .1em; }
+header.capa .sub { font-size: 1.1em; color: #555; margin: 0 0 .5em; }
+header.capa .meta { font-size: .85em; color: #777; }
+p { margin: .55em 0; text-align: justify; }
+ul, ol { margin: .5em 0 .8em 1.3em; padding: 0; }
+li { margin: .18em 0; }
+code {
+  font-family: "DejaVu Sans Mono", monospace; font-size: .88em;
+  background: #f3f3f3; padding: .1em .3em; border-radius: 3px;
+}
+pre {
+  background: #f7f7f7; border: 1px solid #e3e3e3; border-left: 3px solid #888;
+  padding: .7em .9em; overflow-wrap: break-word; white-space: pre-wrap;
+  page-break-inside: avoid;
+}
+pre code { background: none; padding: 0; }
+blockquote {
+  margin: .7em 0; padding: .3em 1em; border-left: 4px solid #bbb;
+  color: #444; background: #fafafa;
+}
+table { border-collapse: collapse; width: 100%; margin: .8em 0; font-size: .93em; }
+th, td { border: 1px solid #ccc; padding: .35em .5em; text-align: left; }
+th { background: #efefef; font-weight: 700; }
+tr:nth-child(even) td { background: #fafafa; }
+img { max-width: 100%; height: auto; }
+hr { border: none; border-top: 1px solid #ddd; margin: 1.4em 0; }
+a { color: #0a5bd3; text-decoration: none; }
+.quebra { page-break-after: always; height: 0; }
+"""
+
+
+def erro(msg: str, codigo: int = 2) -> "None":
+    print(f"md2pdf: {msg}", file=sys.stderr)
+    sys.exit(codigo)
+
+
+def ler_entrada(caminho: str) -> str:
+    if caminho == "-":
+        return sys.stdin.read()
+    p = Path(caminho)
+    if not p.exists():
+        erro(f"entrada nao encontrada: {caminho}")
+    if p.is_dir():
+        erro(f"entrada e um diretorio, nao um arquivo: {caminho}")
+    try:
+        return p.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        try:
+            return p.read_text(encoding="latin-1")
+        except OSError as e:
+            erro(f"nao consegui ler {caminho}: {e}")
+    except OSError as e:
+        erro(f"nao consegui ler {caminho}: {e}")
+
+
+def converter(texto: str) -> str:
+    md = markdown.Markdown(extensions=[
+        "extra", "tables", "fenced_code", "codehilite", "sane_lists",
+        "toc", "attr_list", "md_in_html", "admonition",
+    ])
+    return md.convert(texto)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        prog="md2pdf", add_help=True,
+        description="Converte Markdown em PDF (dentro do container).")
+    ap.add_argument("entrada", nargs="?", help="arquivo .md, ou - para stdin")
+    ap.add_argument("-o", "--saida", help="arquivo PDF de saida")
+    ap.add_argument("--titulo", default="")
+    ap.add_argument("--subtitulo", default="")
+    ap.add_argument("--autor", default="")
+    ap.add_argument("--paper", default="a4", choices=["a4", "letter", "a5"])
+    ap.add_argument("--margem", type=float, default=2.0)
+    ap.add_argument("--fonte", default="DejaVu Sans")
+    ap.add_argument("--numerar-paginas", action="store_true")
+    ap.add_argument("--html", action="store_true",
+                    help="trata a entrada como HTML puro, nao Markdown")
+    args = ap.parse_args()
+
+    if not args.entrada:
+        ap.print_help()
+        return 2
+
+    texto = ler_entrada(args.entrada)
+    if not texto.strip():
+        erro("entrada vazia — nada para gerar")
+
+    corpo = texto if args.html else converter(texto)
+
+    capa = ""
+    if args.titulo or args.subtitulo or args.autor:
+        capa = ['<header class="capa">']
+        if args.titulo:
+            capa.append(f'<div class="titulo">{html.escape(args.titulo)}</div>')
+        if args.subtitulo:
+            capa.append(f'<div class="sub">{html.escape(args.subtitulo)}</div>')
+        if args.autor:
+            capa.append(f'<div class="meta">{html.escape(args.autor)}</div>')
+        capa.append("</header>")
+        capa = "\n".join(capa)
+
+    rodape = ('"p. " counter(page) " / " counter(pages)'
+              if args.numerar_paginas else '""')
+
+    # replace em vez de str.format: chaves de CSS nao sao interpretadas
+    css = (CSS.replace("@@PAPER@@", args.paper)
+              .replace("@@MARGEM_RODAPE@@", f"{max(args.margem, 1.5):g}")
+              .replace("@@MARGEM@@", f"{args.margem:g}")
+              .replace("@@FONTE@@", args.fonte)
+              .replace("@@RODAPE@@", rodape))
+
+    doc = f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><style>{css}</style></head>
+<body>{capa}{corpo}</body></html>"""
+
+    # saida: -o, ou o nome do arquivo com .pdf, ou stdout-aviso
+    if args.saida:
+        destino = Path(args.saida)
+    elif args.entrada != "-":
+        destino = Path(args.entrada).with_suffix(".pdf")
+    else:
+        destino = Path("/dados/saida.pdf")
+
+    pasta = destino.parent
+    if not pasta.exists():
+        erro(f"o diretorio de saida nao existe: {pasta}")
+    if not os.access(pasta, os.W_OK):
+        erro(f"sem permissao de escrita em: {pasta}")
+
+    try:
+        from weasyprint import HTML  # import aqui: falha vira mensagem clara
+    except Exception as e:  # pragma: no cover
+        erro(f"weasyprint indisponivel na imagem: {e}")
+
+    try:
+        HTML(string=doc).write_pdf(str(destino))
+    except Exception as e:
+        erro(f"falha ao renderizar o PDF: {e}", 1)
+
+    if not destino.exists() or destino.stat().st_size == 0:
+        erro("o PDF nao foi gerado (arquivo ausente ou vazio)", 1)
+
+    print(destino)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

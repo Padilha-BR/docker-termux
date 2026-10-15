@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Teste de interacao</title></head>
+<body>
+<h1 id="titulo">antes</h1>
+<button id="botao" onclick="document.getElementById('titulo').textContent='depois do clique'">clicar</button>
+<div id="alvo" style="display:none">conteudo revelado</div>
+<p id="marca">nao rodou</p>
+<script>
+  document.getElementById('botao').addEventListener('click', function () {
+    setTimeout(function () { document.getElementById('alvo').style.display = 'block'; }, 300);
+  });
+  document.getElementById('marca').textContent = 'JS RODOU: ' + (2 + 40);
+</script>
+</body></html>

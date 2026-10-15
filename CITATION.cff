@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "Se voce usar este trabalho, por favor cite como abaixo."
+title: "docker-termux: Docker num Android sem root (correcoes e medicoes)"
+abstract: >-
+  Implementacao e relato de campo de Docker num Android sem root, executado
+  inteiramente dentro de um Galaxy S24 Ultra (Termux). Integra duas camadas de
+  execucao (daemon compativel com a API do Docker sobre udocker, e motor direto),
+  documenta e corrige defeitos do proot e do udockerd no Android, e apresenta o
+  veredito medido de navegacao headless (nenhum Chromium roda sob proot; a cura e
+  o Chromium nativo do Termux, com Chromium headless em 2,8 s em pagina estatica e
+  4,7 s em SPA). Todas as medicoes foram feitas no aparelho, sem root.
+authors:
+  - family-names: Padilha
+    given-names: Gabriel
+    alias: Padilha-BR
+    website: "https://github.com/Padilha-BR"
+type: software
+license: MIT
+version: 1.0.0
+date-released: "2026-10-15"
+repository-code: "https://github.com/Padilha-BR/docker-termux"
+keywords:
+  - android
+  - termux
+  - docker
+  - udocker
+  - proot
+  - containerd
+  - headless-chromium
+  - selenium
+  - chrome-headless
+  - no-root
+  - arm64
+  - aarch64
