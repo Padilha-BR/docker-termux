@@ -139,7 +139,7 @@ if [ "${1:-}" = "run" ]; then
         novos=("run" "-t")
         for a in "${@:2}"; do novos+=("$a"); done
         set -- "${novos[@]}"
-        echo "dica: -t adicionado para o daemon capturar a saida (sem ele `docker logs` volta vazio; limitacao do daemon userspace)" >&2
+        echo "dica: -t adicionado para o daemon capturar a saida (sem ele \`docker logs\` volta vazio; limitacao do daemon userspace)" >&2
     fi
 fi
 
