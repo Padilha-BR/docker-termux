@@ -1,0 +1,267 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# docker-termux-setup — instala/conserta "Docker" no Termux/Android, sem root.
+#
+# Duas camadas, instaladas de forma independente:
+#
+#   CAMADA 1 (modo direto)  udocker + proot 5.1 do Termux. Sem daemon: cada
+#     `docker-direct run` executa o container na hora. Dependencia zero de pip.
+#
+#   CAMADA 2 (daemon)       udockerd (API do Docker em Python puro) + CLI
+#     oficial estatica do Docker. Habilita `docker build`, `exec`, `logs`,
+#     TTY e qualquer cliente de API (CLI oficial, docker-py).
+#
+# Idempotente: pode rodar quantas vezes quiser; cada passo verifica antes de
+# agir. --force refaz os downloads e a compilacao.
+#
+# Correcoes de Android que este script aplica (todas medidas em Android 16/arm64):
+#   1. shim do proot     -> o proot 4.8.0 do udocker nao rastreia filhos (SIGSYS)
+#   2. --link2symlink    -> Android nega hardlink; sem isso apk/apt falham
+#   3. resolv.conf       -> Android nao tem /etc/resolv.conf (container sem DNS)
+#   4. patch do qemu     -> udocker passava so o nome do binario; proot nao acha
+#   5. bind linkerconfig -> silencia o aviso do linker em imagem de outra arch
+#   6. LD_PRELOAD        -> termux-exec quebra qualquer proot; o CLI limpa
+
+set -uo pipefail
+
+VERSAO_UDOCKER="${UDOCKER_VERSAO:-1.3.17}"
+VERSAO_DOCKER_CLI="${DOCKER_CLI_VERSAO:-29.9.1}"
+BASE="$HOME/docker-termux"
+BIN="$BASE/udocker-$VERSAO_UDOCKER/udocker/udocker"
+REPO="$HOME/.udocker"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+MEUBIN="$HOME/.hermes/bin"
+AQUI="$(cd "$(dirname "$0")" && pwd)"
+FORCE=0
+[ "${1:-}" = "--force" ] && FORCE=1
+
+verde() { printf '\033[32m%s\033[0m\n' "$*"; }
+amarelo() { printf '\033[33m%s\033[0m\n' "$*"; }
+vermelho() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+passo() { printf '\n\033[36m==>\033[0m %s\n' "$*"; }
+falhou=0
+
+# ------------------------------------------------------------- 1. dependencias
+passo "1/8 dependencias"
+faltando=()
+for p in proot curl tar gzip xz-utils python; do
+    dpkg -s "$p" >/dev/null 2>&1 || faltando+=("$p")
+done
+[ ${#faltando[@]} -gt 0 ] && { pkg install -y "${faltando[@]}" || { vermelho "falha: ${faltando[*]}"; falhou=1; }; }
+if ! command -v qemu-x86_64 >/dev/null 2>&1; then
+    pkg install -y qemu-user-x86-64 >/dev/null 2>&1 \
+        || amarelo "sem qemu-user-x86-64: imagens amd64 nao rodarao (resto funciona)"
+fi
+if ! command -v cc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then
+    amarelo "sem compilador C: o supervisor do daemon nao compila"
+    amarelo "  (consequencia: docker logs do container principal fica limitado)"
+    amarelo "  para resolver: pkg install clang"
+fi
+command -v proot >/dev/null 2>&1 || { vermelho "proot ausente — impossivel continuar"; exit 1; }
+
+# --------------------------------------------------------------- 2. udocker
+passo "2/8 runtime udocker $VERSAO_UDOCKER (modo direto)"
+mkdir -p "$BASE" "$BASE/logs" "$BASE/state" "$MEUBIN"
+if [ ! -x "$BIN" ] || [ "$FORCE" = 1 ]; then
+    TMPD="${TMPDIR:-$PREFIX/tmp}"; cd "$TMPD" || exit 1
+    if [ ! -d "$TMPD/udocker-$VERSAO_UDOCKER" ] || [ "$FORCE" = 1 ]; then
+        curl -sL -o "udocker-$VERSAO_UDOCKER.tar.gz" \
+            "https://github.com/indigo-dc/udocker/releases/download/$VERSAO_UDOCKER/udocker-$VERSAO_UDOCKER.tar.gz" \
+            || { vermelho "download do udocker falhou"; exit 1; }
+        tar zxf "udocker-$VERSAO_UDOCKER.tar.gz" || { vermelho "extracao falhou"; exit 1; }
+    fi
+    rm -rf "$BASE/udocker-$VERSAO_UDOCKER"
+    cp -a "$TMPD/udocker-$VERSAO_UDOCKER" "$BASE/"
+    chmod +x "$BIN"
+else
+    echo "  ja instalado: $BIN"
+fi
+[ -d "$REPO/bin" ] || {
+    echo "  baixando binarios do engine..."
+    PROOT_NO_SECCOMP=1 TMPDIR="${TMPDIR:-$PREFIX/tmp}" "$BIN" install >/dev/null 2>&1
+}
+
+# ------------------------------------------------------------- 3. shim proot
+passo "3/8 shim do proot (proot 5.1 do Termux + --link2symlink)"
+SHIM="$REPO/bin/proot-arm64-4_8_0"
+if [ ! -f "$SHIM" ]; then
+    vermelho "  $SHIM ausente — rode: $BIN install"; falhou=1
+elif grep -q "link2symlink" "$SHIM" 2>/dev/null && [ "$FORCE" = 0 ]; then
+    echo "  ja aplicado"
+else
+    [ -f "$SHIM.udocker.orig" ] || cp "$SHIM" "$SHIM.udocker.orig"
+    cat > "$SHIM" <<SHIMEOF
+#!/data/data/com.termux/files/usr/bin/bash
+# Shim do docker-termux: troca o proot 4.8.0 do udocker pelo proot 5.1 do Termux
+# (o 4.8.0 morre com SIGSYS em fork+exec no Android) e liga --link2symlink
+# (o Android nega hardlink no rootfs, o que quebra apk/apt).
+exec $PREFIX/bin/proot --link2symlink "\$@"
+SHIMEOF
+    chmod +x "$SHIM"; verde "  shim aplicado"
+fi
+
+# -------------------------------------------------------------- 4. patch qemu
+passo "4/8 patch do qemu (caminho absoluto)"
+ARQ_PY="$BASE/udocker-$VERSAO_UDOCKER/udocker/engine/proot.py"
+if grep -q "PATCH ANDROID" "$ARQ_PY" 2>/dev/null; then
+    echo "  ja aplicado"
+else
+    python3 - "$ARQ_PY" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+velho = """        qemu_filename = self._get_qemu()
+        return ["-q", qemu_filename] if qemu_filename else []"""
+novo = """        # PATCH ANDROID: o proot resolve o -q pelo PATH do container, que nao
+        # tem qemu; caminho absoluto funciona (o proot executa no host).
+        qemu_filename = self._get_qemu(return_path=True)
+        return ["-q", qemu_filename] if qemu_filename else []"""
+if velho in s:
+    open(p, "w", encoding="utf-8").write(s.replace(velho, novo, 1))
+    print("  patch aplicado")
+else:
+    print("  AVISO: trecho nao encontrado (versao diferente do udocker?)")
+PYEOF
+    [ $? -eq 0 ] && verde "  patch qemu ok"
+fi
+if command -v qemu-x86_64 >/dev/null 2>&1; then
+    ln -sf "$(command -v qemu-x86_64)" "$REPO/bin/qemu-x86_64" 2>/dev/null
+    echo "  qemu-x86_64 ligado em $REPO/bin"
+fi
+
+# --------------------------------------------------------- 5. daemon udockerd
+passo "5/8 daemon: udockerd (API do Docker) em venv isolado"
+VENV="$BASE/venv-udockerd"
+if [ ! -x "$VENV/bin/udockerd" ] || [ "$FORCE" = 1 ]; then
+    python3 -m venv --system-site-packages "$VENV" 2>/dev/null
+    "$VENV/bin/pip" install -q --upgrade pip >/dev/null 2>&1
+    if "$VENV/bin/pip" install -q udockerd 2>&1 | tail -2; then
+        verde "  udockerd instalado"
+    else
+        amarelo "  pip install udockerd falhou (camada 1 continua funcionando)"
+        falhou=1
+    fi
+else
+    echo "  ja instalado: $("$VENV/bin/udockerd" --version 2>/dev/null)"
+fi
+
+# ---------------------------------------------- 6. supervisor + CLI oficial
+passo "6/8 supervisor do daemon + CLI oficial do Docker"
+if [ -x "$VENV/bin/python" ]; then
+    "$VENV/bin/python" -c "
+from udockerd.supervisor import ensure_supervisor
+print('  supervisor:', ensure_supervisor())
+" 2>&1 | tail -2 || amarelo "  supervisor nao compilou (precisa de cc/clang)"
+
+    # O daemon usa a LIB udocker instalada no venv (copia propria). Ela precisa
+    # do mesmo patch do qemu: sem isso, imagem amd64 pelo daemon morre com
+    # "proot error: 'qemu-x86_64' not found".
+    PY_VENV=$(ls -d "$VENV"/lib/python*/site-packages/udocker/engine/proot.py 2>/dev/null | head -1)
+    if [ -n "$PY_VENV" ] && ! grep -q "PATCH ANDROID" "$PY_VENV"; then
+        python3 - "$PY_VENV" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p, encoding="utf-8").read()
+velho = """        qemu_filename = self._get_qemu()
+        return ["-q", qemu_filename] if qemu_filename else []"""
+novo = """        # PATCH ANDROID: caminho absoluto do qemu (o proot procura no PATH do
+        # container, que nao tem qemu).
+        qemu_filename = self._get_qemu(return_path=True)
+        return ["-q", qemu_filename] if qemu_filename else []"""
+if velho in s:
+    open(p, "w", encoding="utf-8").write(s.replace(velho, novo, 1))
+    print("  patch do qemu aplicado na lib do daemon")
+else:
+    print("  AVISO: lib do daemon sem o trecho esperado")
+PYEOF
+        verde "  lib do daemon ajustada"
+        ( bash "$HOME/.hermes/bin/docker-daemon-down" >/dev/null 2>&1 || true )
+    fi
+fi
+
+CLI="$BASE/bin/docker"
+if [ ! -x "$CLI" ] || [ "$FORCE" = 1 ]; then
+    mkdir -p "$BASE/bin"
+    TMPD="${TMPDIR:-$PREFIX/tmp}"; cd "$TMPD" || exit 1
+    arquivo="docker-$VERSAO_DOCKER_CLI.tgz"
+    echo "  baixando CLI estatica $VERSAO_DOCKER_CLI (arm64)..."
+    if curl -sfL -o "$arquivo" "https://download.docker.com/linux/static/stable/aarch64/$arquivo" \
+        && tar xzf "$arquivo" docker/docker 2>/dev/null; then
+        cp docker/docker "$CLI"; chmod +x "$CLI"; rm -rf docker "$arquivo"
+        verde "  CLI instalada: $("$CLI" --version)"
+    else
+        ultima=$(curl -s https://download.docker.com/linux/static/stable/aarch64/ \
+                 | grep -oE 'docker-[0-9]+\.[0-9]+\.[0-9]+\.tgz' | sort -uV | tail -1)
+        if [ -n "$ultima" ] && curl -sfL -o "$ultima" \
+            "https://download.docker.com/linux/static/stable/aarch64/$ultima" \
+            && tar xzf "$ultima" docker/docker 2>/dev/null; then
+            cp docker/docker "$CLI"; chmod +x "$CLI"; rm -rf docker "$ultima"
+            verde "  CLI instalada (fallback): $("$CLI" --version)"
+        else
+            amarelo "  CLI oficial indisponivel: so o modo direto vai funcionar"
+        fi
+    fi
+else
+    echo "  ja instalada: $("$CLI" --version 2>/dev/null)"
+fi
+
+# -------------------------------------------------------------- 7. os scripts
+passo "7/8 scripts do CLI em $MEUBIN"
+for s in docker docker-direct docker-daemon-up docker-daemon-down; do
+    if [ -f "$AQUI/scripts/$s" ]; then
+        cp "$AQUI/scripts/$s" "$MEUBIN/$s"; chmod +x "$MEUBIN/$s"; echo "  $s"
+    elif [ -x "$MEUBIN/$s" ]; then
+        echo "  $s (ja presente)"
+    else
+        amarelo "  $s AUSENTE — copie de scripts/ para $MEUBIN"
+        falhou=1
+    fi
+done
+case ":$PATH:" in
+    *":$MEUBIN:"*) ;;
+    *) amarelo "  adicione ao ~/.bashrc: export PATH=\$HOME/.hermes/bin:\$PATH" ;;
+esac
+
+# --------------------------------------------------------------- 8. atalhos
+passo "8/8 atalhos de toque (Termux:Widget) e DNS"
+mkdir -p "$HOME/.shortcuts"
+cat > "$HOME/.shortcuts/Docker status.sh" <<'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+export PATH=$HOME/.hermes/bin:$PATH
+clear; docker doctor; echo; docker ps -a; echo; docker images
+read -r -p "Enter para fechar..."
+EOF
+cat > "$HOME/.shortcuts/Docker shell.sh" <<'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+export PATH=$HOME/.hermes/bin:$PATH
+clear
+echo "Shell dentro de um container Alpine. Digite exit para sair."
+docker run -it --rm alpine:3.20 sh
+EOF
+cat > "$HOME/.shortcuts/Docker ajuda.sh" <<'EOF'
+#!/data/data/com.termux/files/usr/bin/bash
+export PATH=$HOME/.hermes/bin:$PATH
+clear; docker help; echo; echo "Dicas: docker doctor | docker ps -a | docker images"
+read -r -p "Enter para fechar..."
+EOF
+chmod +x "$HOME/.shortcuts/Docker"*.sh && echo "  atalhos prontos"
+
+n=0
+for c in "$REPO"/containers/*/; do
+    [ -d "$c/ROOT/etc" ] || continue
+    printf 'nameserver 8.8.8.8\nnameserver 8.8.4.4\n' > "$c/ROOT/etc/resolv.conf" 2>/dev/null && n=$((n+1))
+done
+echo "  resolv.conf (modo direto) em $n container(s)"
+
+# ------------------------------------------------------------------- resumo
+if command -v docker >/dev/null 2>&1; then
+    passo "verificacao"
+    docker doctor || true
+    passo "teste real"
+    docker run --rm alpine sh -c "echo 'docker rodando:' \$(uname -m)" 2>&1 | tail -2
+else
+    amarelo "export PATH=\$HOME/.hermes/bin:\$PATH  e rode: docker doctor"
+fi
+
+echo
+[ "$falhou" = 0 ] && verde "Instalacao concluida." || vermelho "Terminou com pendencias (veja acima)."
+exit "$falhou"

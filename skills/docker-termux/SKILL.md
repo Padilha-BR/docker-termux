@@ -2,7 +2,7 @@
 name: docker-termux
 description: "Use when rodando Docker no Termux/Android sem root."
 version: 2.0.0
-platforms: [linux]
+platforms: [linux, android]
 author: Hermes Agent
 license: MIT
 metadata:
@@ -84,7 +84,90 @@ faz sozinho quando a imagem não é da arquitetura do host).
 | `docker build` -> `no such image: <FROM>` | o builder do daemon não puxa o `FROM` | o dispatcher lê o Dockerfile do contexto e puxa as bases antes |
 | `docker logs` vazio em container destacado | sem TTY o stdout herda o do daemon (issue #8) | injeta `-t` em `run -d` com aviso |
 
+## Utilitários que só existem via container
+
+Ferramentas que **não** existem no Termux (e não têm pacote) e por isso rodam em
+imagem Docker, chamadas como comandos normais:
+
+| comando | o que faz | imagem |
+|---|---|---|
+| `pdf` | Markdown -> PDF tipografado (weasyprint; capa, A4/letter, emoji, numeração) | `pdf-tool:1` |
+| `pdfpy` | roda qualquer helper da skill `pdf` (pypdf/reportlab/pdfplumber) | `pdf-tool:1` |
+| `webget` | baixa página e extrai texto/HTML/links (**nível 1**, sem navegador) | `web:1` |
+| `webprint` | Chromium headless **nativo** (fora do container): `--dom` / `--texto` / `--pdf` / `--png` (**nível 2**) | — (usa `chromium-browser`) |
+| `webplay` | roda **seu** script Playwright (**nível 3**) | `navegador:1` |
+
+Fontes em `~/docker-termux/imagens/<nome>/`; cópia publicada em
+`github.com/Padilha-BR/docker-termux`. Cada comando constrói a imagem na primeira
+execução (avisa).
+
+### Headless: escolha o nível pelo custo (medido)
+
+| nível | ferramenta | quando | custo medido | estado |
+|---|---|---|---|---|
+| 1 | `webget` (httpx + bs4/lxml, container) | HTML já traz o conteúdo (notícia, blog, doc, wiki) — **comece aqui** | 4,3 s, ~34 MB | **OK** |
+| 2 | `webprint` (Chromium **nativo**, sem container) | página precisa de JS, ninguém precisa clicar | 2,9 s (estática) / 4,7 s (SPA) | **OK (medido)** |
+| 3 | `webplay` (Playwright) | login, formulário, esperar seletor, várias abas | ver seção abaixo | nativo via `executable_path` |
+
+**Nenhum Chromium sobrevive ao `proot`** (medido: Chrome for Testing 156 e
+`chrome-headless-shell` 156, arm64 nativos). Sintomas: `Trace/breakpoint trap`
+(SIGTRAP), `Browser.new_page: Target crashed`, ou loop infinito de
+`crashpad ... tgkill: No such process` até o timeout. Não é flag faltando —
+`--no-sandbox`, `--single-process`, `--no-zygote`, `--headless=old` e
+`GLIBC_TUNABLES=glibc.pthread.rseq=0` foram todos testados. Causa: o `proot`
+intercepta syscalls por **ptrace**, e o crashpad do Chromium também depende de
+ptrace/processos filhos — os dois brigam.
+
+**Cura: use o Chromium NATIVO do Termux** (bionic, sem proot → sem ptrace):
+
+    yes | pkg install x11-repo          # gtk3/libxkbcommon/libevdev vem daqui
+    yes | pkg install chromium          # binario: `chromium-browser` (o real e
+                                        # $PREFIX/lib/chromium/chrome, 276 MB)
+    chromium-browser --headless=new --no-sandbox --disable-gpu \
+        --disable-dev-shm-usage --virtual-time-budget=8000 --dump-dom URL
+
+Medido (arm64, Android 16): estática **2,9 s**, SPA `react.dev` **4,7 s** (o JS
+roda e o texto sai renderizado), `--screenshot` PNG 3,1 s, `--print-to-pdf` 88 KB.
+É mais rápido que o mesmo fetch pelo `webget` dentro do container (7 s).
+Os erros de `dbus`/`udev` no stderr são inofensivos (Android não tem bus).
+
+**Nível 3 = Selenium, não Playwright**: o Playwright não tem wheel para Android
+(`pip install playwright` → `No matching distribution found`). O caminho é
+`chromedriver` (vem no pacote `chromium`, mesma versão) + `selenium` (Python puro,
+instalado em `~/docker-termux/venv-web`). O helper `webauto.py` já traz as flags do
+Android e `webplay script.py` roda seu script. Medido: clique real, espera por
+elemento e screenshot OK em 4,0-4,8 s.
+
+**Escolha pelo recurso escasso, não só pelo tempo**: em página estática o nível 1
+gasta 4,3 s e ~34 MB, o nível 2 gasta 2,8 s e **~1 GB** (o Chromium nativo tem
+custo alto de RAM: medido 1012-1110 MB). Prefira o nível 1 quando a memória é o
+limitante; suba para o 2 quando a página precisa de JS. **Nunca rode dois
+Chromiums ao mesmo tempo** no aparelho — dois headless simultâneos travam a
+espera por elemento (visto na prática: 2 GB de RAM).
+O wrapper `webprint` já usa essa via (`--dom|--texto|--pdf|--png`); `CHROMIUM_BIN`
+troca o binário e `WEBPRINT_TIMEOUT` o timeout. Sem `pkg install chromium`, a
+alternativa é **delegar para uma VM Linux** por SSH.
+
+`webget` sai com **código 3** quando o conteúdo vem vazio (página JS): é o sinal
+para subir para o nível 2. Anti-bot forte (Cloudflare) e mídia (use `yt-dlp`) não
+se resolvem com navegador.
+
+### Regra para sites que consomem cota de sessão
+
+Navegador automatizado abre sessão de verdade. Se o serviço cobra ou limita
+logins concorrentes (planos com número fixo de acessos), **prefira HTTP puro**
+(`requests`) em vez de navegador — a automação não muda a cota, agrava. Vale para
+qualquer sistema com cota compartilhada, com ou sem container.
+
 ## Armadilhas que custam tempo
+
+- **`-v` NÃO aceita sufixo `:ro`/`:rw`.** `-v /host/script.py:/ctr/script.py:ro`
+  não monta nada e ainda cria um arquivo chamado **`script.py:ro`** dentro do
+  destino — o container então falha com `can't open file '/ctr/script.py'`. Use
+  sempre a forma pura `-v origem:destino`. (Binds de arquivo **e** de diretório
+  funcionam assim: o proot cria o ponto de montagem, desde que o caminho não
+  tenha opção colada.) Verificação de que o bind pegou:
+  `sha256sum` do arquivo dentro e fora devem bater.
 
 - **`docker logs` de container destacado exige `-t`** no udockerd 0.3.5: sem TTY a
   saída herda o stdout do daemon e o log volta vazio. Comprovado variando só o `-t`
@@ -97,6 +180,14 @@ faz sozinho quando a imagem não é da arquitetura do host).
   `http://127.0.0.1:2375/_ping` (o `DOCKER_HOST` é que é `tcp://`).
 - **Uma arquitetura por tag**: `pull --platform=linux/amd64 alpine:latest`
   sobrescreve a imagem arm64 local daquela tag. Para voltar, pull sem `--platform`.
+- **O builder do daemon NÃO tem cache de camadas**: mudar o `Dockerfile` refaz apt+pip
+do zero (5-20 min). Por isso o código que muda com frequência (ex.: `md2pdf`,
+`webget.py`, `webprint.py`) é **montado** do celular no container em vez de
+copiado na imagem — editar o script não exige rebuild.
+- **Nunca reconstrua imagem com containers rodando**, e não reinicie o daemon
+durante um build.
+- Imagens pesadas: `navegador:1` ~2 GB, `pdf-tool:1` ~400 MB, `web:1` ~200 MB.
+Confira espaço antes (`df -h ~`).
 - **Nunca `pkill -f udockerd`**: a própria linha de comando casa com o padrão e
   mata a sua shell (e o daemon). Use o pidfile: `docker daemon down`.
 - **Não reinicie o daemon com build rodando.** `docker daemon down` mata o grupo

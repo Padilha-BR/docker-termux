@@ -1,0 +1,144 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# pdf — gera um PDF tipografado a partir de um Markdown, usando o Docker.
+#
+# Por que precisa do Docker: no Termux nao existe weasyprint, pandoc-com-engine,
+# wkhtmltopdf, LaTeX (texlive nem tem pacote) nem libreoffice. A renderizacao de
+# verdade acontece dentro do container; aqui so orquestramos.
+#
+# Uso:
+#   pdf aula.md
+#   pdf aula.md -o Atividade\ 3.pdf --titulo "Atividade 3" --numerar-paginas
+#   cat anotacoes.md | pdf - -o resumo.pdf
+#
+# Opcoes extras vao direto para o md2pdf dentro do container (veja pdf --ajuda-motor).
+
+# Binds: o udocker NAO suporta ':ro' (vira parte do nome do arquivo). Use -v orig:dest.
+set -uo pipefail
+
+IMG="pdf-tool:1"
+FONTE_IMG="$HOME/docker-termux/imagens/pdf"
+TMP_HOST="${TMPDIR:-$PREFIX/tmp}"
+
+erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
+
+uso() {
+    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+}
+
+case "${1:-}" in
+    ""|-h|--help|--ajuda) uso ;;
+esac
+
+ENTRADA="$1"; shift
+
+if [ "$ENTRADA" != "-" ]; then
+    [ -e "$ENTRADA" ] || erro "arquivo nao encontrado: $ENTRADA"
+    [ -f "$ENTRADA" ] || erro "nao e um arquivo: $ENTRADA"
+    [ -r "$ENTRADA" ] || erro "sem permissao de leitura: $ENTRADA"
+fi
+
+# --- descobre a saida pedida (-o / --saida), aceitando as tres formas ---------
+SAIDA=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[i]}" in
+        -o | --saida) SAIDA="${args[i + 1]:-}" ;;
+        -o=*) SAIDA="${args[i]#-o=}" ;;
+        --saida=*) SAIDA="${args[i]#--saida=}" ;;
+    esac
+done
+if [ "${#args[@]}" -gt 0 ]; then
+    for ((i = 0; i < ${#args[@]}; i++)); do
+        case "${args[i]}" in
+            -o | --saida)
+                [ $((i + 1)) -lt ${#args[@]} ] || erro "opcao ${args[i]} exige um valor"
+                ;;
+        esac
+    done
+fi
+
+# --- garante a imagem (build na primeira vez) --------------------------------
+if ! docker image inspect "$IMG" >/dev/null 2>&1; then
+    echo "==> imagem $IMG ausente; construindo (primeira vez, ~1 min)" >&2
+    [ -f "$FONTE_IMG/Dockerfile" ] || erro "Dockerfile nao encontrado em $FONTE_IMG"
+    (cd "$FONTE_IMG" && docker build -q -t "$IMG" . >&2) || erro "falha ao construir a imagem $IMG"
+fi
+
+# --- diretorio de trabalho montado em /dados ---------------------------------
+LIMPAR_TMP=0
+if [ "$ENTRADA" = "-" ]; then
+    BASE="$(mktemp -d "$TMP_HOST/pdf-XXXXXX")" || erro "nao consegui criar diretorio temporario"
+    LIMPAR_TMP=1
+    cat >"$BASE/entrada.md" || { rm -rf "$BASE"; erro "falha lendo a entrada padrao"; }
+    NOME_ENTRADA="entrada.md"
+    ORIGEM="$BASE"
+else
+    ORIGEM="$(cd "$(dirname "$ENTRADA")" && pwd)" || erro "nao consegui resolver o caminho de $ENTRADA"
+    NOME_ENTRADA="$(basename "$ENTRADA")"
+    BASE="$ORIGEM"
+fi
+
+# destino final no celular
+if [ -n "$SAIDA" ]; then
+    DESTINO="$SAIDA"
+elif [ "$ENTRADA" != "-" ]; then
+    DESTINO="${ENTRADA%.*}.pdf"
+else
+    DESTINO="$PWD/saida.pdf"
+fi
+# relativo -> absoluto (para o mv no fim)
+case "$DESTINO" in
+    /*) ;;
+    *) DESTINO="$PWD/$DESTINO" ;;
+esac
+DIR_DESTINO="$(dirname "$DESTINO")"
+[ -d "$DIR_DESTINO" ] || erro "o diretorio de destino nao existe: $DIR_DESTINO"
+[ -w "$DIR_DESTINO" ] || erro "sem permissao de escrita em: $DIR_DESTINO"
+
+TEMP_PDF=".pdf-termux-$$.pdf"
+
+# os args do usuario vao para o motor, MENOS -o/--saida: o destino final e
+# resolvido aqui no celular (senao o -o do usuario sobrescreveria o temporario
+# interno e o CLI perderia o arquivo)
+args_motor=()
+pular=0
+for a in "$@"; do
+    if [ "$pular" = 1 ]; then pular=0; continue; fi
+    case "$a" in
+        -o | --saida) pular=1 ;;
+        -o=* | --saida=*) ;;
+        *) args_motor+=("$a") ;;
+    esac
+done
+
+# --- roda o container --------------------------------------------------------
+# motor direto de proposito: bind (-v) nao existe na camada do daemon, e assim
+# nao aparece aviso a cada chamada. O gerador (md2pdf) vem do celular montado
+# em /usr/local/bin, entao editar o script NAO exige rebuild da imagem (o
+# builder do daemon nao tem cache de camadas: cada build refaz o apt+pip).
+docker-direct run --rm \
+    -v "$BASE:/dados" \
+    -v "$FONTE_IMG/md2pdf:/usr/local/bin/md2pdf" \
+    -u "$(id -u):$(id -g)" \
+    "$IMG" \
+    "/dados/$NOME_ENTRADA" -o "/dados/$TEMP_PDF" "${args_motor[@]+"${args_motor[@]}"}"
+rc=$?
+
+if [ "$rc" -ne 0 ]; then
+    [ "$LIMPAR_TMP" = 1 ] && rm -rf "$BASE"
+    printf 'erro: a geracao falhou (codigo %s) — veja a mensagem acima\n' "$rc" >&2
+    exit "$rc"        # propaga o codigo real do motor (2 = erro de argumento)
+fi
+
+GERADO="$BASE/$TEMP_PDF"
+if [ ! -s "$GERADO" ]; then
+    [ "$LIMPAR_TMP" = 1 ] && rm -rf "$BASE"
+    erro "o container nao produziu o PDF esperado"
+fi
+
+mv -f "$GERADO" "$DESTINO" || erro "nao consegui mover o PDF para $DESTINO"
+[ "$LIMPAR_TMP" = 1 ] && rm -rf "$BASE"
+
+TAM=$(du -h "$DESTINO" | cut -f1)
+echo "$DESTINO ($TAM)"

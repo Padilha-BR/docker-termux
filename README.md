@@ -242,6 +242,41 @@ tratadas automaticamente pelo comando `docker`:
 | `docker build` falha com `no such image: <base do FROM>` | o builder do daemon não puxa o `FROM` (o Docker real puxa) | lê o `Dockerfile` do contexto, acha as imagens base e puxa antes de construir |
 | `docker logs` de container destacado volta vazio | sem TTY o stdout herda o do daemon — [issue #8](https://github.com/bjia56/udockerd/issues/8) | insere `-t` em `run -d` e avisa |
 
+## Binds e navegador: dois achados medidos
+
+**1. `-v` não aceita `:ro`.** `-v /host/script.py:/ctr/script.py:ro` não monta nada
+e ainda cria um arquivo chamado `script.py:ro` dentro do destino — o container
+falha com `can't open file '/ctr/script.py'`. Use a forma pura `-v origem:destino`
+(vale para arquivo e para diretório). Prova de que o bind pegou: `sha256sum` do
+arquivo dentro e fora devem bater.
+
+**2. Nenhum Chromium sobrevive ao `proot`** — e a cura é não usar container para
+isso. Medido com Chrome for Testing 156 e `chrome-headless-shell` 156 (arm64
+nativos): `Trace/breakpoint trap` (SIGTRAP), `Target crashed`, ou loop de
+`crashpad ... tgkill: No such process` até estourar o timeout. Testado
+`--no-sandbox`, `--single-process`, `--no-zygote`, `--headless=old` e
+`GLIBC_TUNABLES=glibc.pthread.rseq=0` — nenhum resolve. Causa: o `proot`
+intercepta syscalls por **ptrace**, e o crashpad do Chromium também depende de
+ptrace/processos filhos.
+
+| via | página estática | SPA (só JS) | RAM pico |
+|---|---|---|---|
+| HTTP puro (`webget`, dentro do container) | 4,3 s | falha (volta vazio) | ~34 MB |
+| **Chromium NATIVO do Termux** (`webprint`) | 2,8 s | **6,2 s, renderizado** | ~1 GB |
+| Selenium + `chromedriver` nativo (`webplay`) | 4,0 s | OK | ~1 GB |
+
+```sh
+pkg install x11-repo && pkg install chromium   # binário: chromium-browser
+chromium-browser --headless=new --no-sandbox --disable-gpu \
+    --disable-dev-shm-usage --virtual-time-budget=8000 --dump-dom URL
+```
+
+O `chromedriver` vem no mesmo pacote e roda com `selenium` (Python puro) — o
+Playwright **não existe para Android** (nenhum wheel no PyPI). Os wrappers
+`webprint` (nível 2) e `webplay` (nível 3, com o helper `webauto.py`) usam essa
+via. Custo honesto: o Chromium nativo come ~1 GB de RAM — prefira HTTP puro
+quando o HTML já traz o conteúdo, e nunca rode dois Chromiums em paralelo.
+
 ## Limitações honestas
 
 - **Não reinicie o daemon com um build rodando:** `docker daemon down` mata o
@@ -349,3 +384,10 @@ docker build -t minha-imagem .     # real build, no daemon
 
 See the Portuguese section above for the full defect list, verification commands
 and limitations — the two sections describe the same thing.
+
+Two measured findings worth highlighting: `-v` does **not** accept a `:ro`
+suffix (it becomes part of the filename), and **no Chromium survives `proot`**
+(SIGTRAP / crashpad loop — the `proot` ptrace interception and Chromium's
+crashpad collide). The fix for headless browsing is the **native Termux
+Chromium** (`pkg install x11-repo && pkg install chromium`), driven by
+`webprint` or by `selenium` + the bundled `chromedriver` (`webplay`).

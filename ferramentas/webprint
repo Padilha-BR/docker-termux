@@ -1,0 +1,120 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# webprint — Chromium headless no celular (NIVEL 2), NATIVO (sem container).
+#
+# O Chromium do Termux roda em bionic, sem proot — e por isso FUNCIONA. Dentro
+# do container ele nao roda (o proot e o crashpad brigam por ptrace).
+#
+# Use quando a pagina precisa de JavaScript mas ninguem precisa clicar.
+# Para interagir (login, formulario, esperar seletor) use `webplay`.
+#
+# Uso:
+#   webprint https://site.com --dom  -o pagina.html
+#   webprint https://site.com --texto            (texto limpo, ja com JS rodado)
+#   webprint https://site.com --pdf  -o site.pdf
+#   webprint https://site.com --png  -o captura.png [--tamanho 900,700]
+#   webprint https://site.com --dom --espera 20000   (ms de JS; padrao 8000)
+set -uo pipefail
+
+CHROME="${CHROMIUM_BIN:-chromium-browser}"
+TIMEOUT="${WEBPRINT_TIMEOUT:-90}"
+
+erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
+
+case "${1:-}" in
+    ""|-h|--help|--ajuda)
+        sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+        exit 2
+        ;;
+esac
+
+command -v "$CHROME" >/dev/null 2>&1 || erro \
+    "$CHROME nao encontrado. Instale com: pkg install x11-repo && pkg install chromium"
+
+URL=""; MODO=""; SAIDA=""; ESPERA=8000; TAMANHO="900,1200"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dom|--html|--texto|--pdf|--png)  MODO="$1"; shift ;;
+        -o|--saida)      SAIDA="${2:-}"; [ -n "$SAIDA" ] || erro "-o exige um arquivo"; shift 2 ;;
+        --espera)        ESPERA="${2:-8000}"; shift 2 ;;
+        --tamanho)       TAMANHO="${2:-900,1200}"; shift 2 ;;
+        http*)           URL="$1"; shift ;;
+        -*)              erro "opcao desconhecida: $1" ;;
+        *)               erro "argumento inesperado: $1" ;;
+    esac
+done
+[ -n "$URL" ]  || erro "informe a URL"
+[ -n "$MODO" ] || erro "informe o modo: --dom | --texto | --pdf | --png"
+
+PERFIL="${TMPDIR:-$PREFIX/tmp}/webprint-perfil-$$"
+mkdir -p "$PERFIL"
+limpar() { rm -rf "$PERFIL" 2>/dev/null; }
+trap limpar EXIT
+
+FLAGS=(--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage
+       --no-first-run --no-default-browser-check --hide-scrollbars
+       --disable-features=Translate,BackForwardCache
+       --user-data-dir="$PERFIL" --virtual-time-budget="$ESPERA")
+
+gerar() {   # roda o chromium; $1 = destino (ou "" para stdout)
+    if [ -n "$1" ]; then
+        timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" "$@" "$URL" 2>/dev/null
+    else
+        timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" "$URL" 2>/dev/null
+    fi
+}
+
+case "$MODO" in
+    --png)
+        DEST="${SAIDA:-pagina.png}"
+        timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" --window-size="$TAMANHO" \
+            --screenshot="$PWD/$DEST" "$URL" 2>/dev/null
+        rc=$?
+        [ "$rc" -eq 124 ] && erro "timeout de ${TIMEOUT}s ao capturar $URL"
+        [ -s "$PWD/$DEST" ] || erro "screenshot nao foi gerada"
+        printf '%s (%s)\n' "$PWD/$DEST" "$(du -h "$PWD/$DEST" | cut -f1)"
+        ;;
+    --pdf)
+        DEST="${SAIDA:-pagina.pdf}"
+        timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" --no-pdf-header-footer \
+            --print-to-pdf="$PWD/$DEST" "$URL" 2>/dev/null
+        rc=$?
+        [ "$rc" -eq 124 ] && erro "timeout de ${TIMEOUT}s ao gerar PDF"
+        [ -s "$PWD/$DEST" ] || erro "PDF nao foi gerado"
+        printf '%s (%s)\n' "$PWD/$DEST" "$(du -h "$PWD/$DEST" | cut -f1)"
+        ;;
+    --dom)
+        TMP="${TMPDIR:-$PREFIX/tmp}/webprint-$$.html"
+        timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" --dump-dom "$URL" \
+            > "$TMP" 2>/dev/null
+        rc=$?
+        [ "$rc" -eq 124 ] && erro "timeout de ${TIMEOUT}s ao baixar $URL"
+        [ -s "$TMP" ] || erro "DOM vazio"
+        if [ -n "$SAIDA" ]; then
+            mv "$TMP" "$SAIDA"
+            printf '%s (%s)\n' "$SAIDA" "$(du -h "$SAIDA" | cut -f1)"
+        else
+            cat "$TMP"; rm -f "$TMP"
+        fi
+        ;;
+    --texto)
+        TMP="${TMPDIR:-$PREFIX/tmp}/webprint-$$.html"
+        timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" --dump-dom "$URL" \
+            > "$TMP" 2>/dev/null
+        rc=$?
+        [ "$rc" -eq 124 ] && erro "timeout de ${TIMEOUT}s ao baixar $URL"
+        TEXTO=$(python3 - "$TMP" <<'PY'
+import re, sys, html
+bruto = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+bruto = re.sub(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", bruto)
+bruto = re.sub(r"(?is)<br\s*/?>|</(p|div|li|h[1-6]|tr)>", "\n", bruto)
+texto = re.sub(r"(?s)<[^>]+>", " ", bruto)
+texto = html.unescape(texto)
+linhas = [" ".join(l.split()) for l in texto.splitlines()]
+print("\n".join(l for l in linhas if l))
+PY
+)
+        rm -f "$TMP"
+        if [ -n "$SAIDA" ]; then printf '%s\n' "$TEXTO" > "$SAIDA"; printf '%s\n' "$SAIDA"
+        else printf '%s\n' "$TEXTO"; fi
+        ;;
+esac

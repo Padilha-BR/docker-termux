@@ -1,0 +1,63 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# pdfpy — roda os scripts da skill `pdf` dentro do container.
+#
+# Por que: no Termux faltam pypdf, reportlab e pdfplumber (e nao ha pacote para
+# eles no repositorio). A imagem pdf-tool tem as tres + poppler-utils, entao os
+# helpers da skill rodam aqui sem alterar o celular.
+#
+# Uso:
+#   pdfpy pdf_read.py documento.pdf --text
+#   pdfpy scripts/pdf_merge.py a.pdf b.pdf -o unido.pdf
+#   pdfpy pdf_create.py spec.json -o saida.pdf
+#   pdfpy --lista            (mostra os helpers disponiveis)
+#
+# O diretorio atual e montado em /dados (caminhos relativos funcionam).
+
+# Binds: o udocker NAO suporta ':ro' (vira parte do nome do arquivo). Use -v orig:dest.
+set -uo pipefail
+
+IMG="pdf-tool:1"
+SKILL="$HOME/.hermes/skills/productivity/pdf/scripts"
+FONTE_IMG="$HOME/docker-termux/imagens/pdf"
+
+erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
+
+if [ "${1:-}" = "--lista" ] || [ "${1:-}" = "-l" ]; then
+    echo "helpers da skill pdf disponiveis:"
+    for f in "$SKILL"/pdf_*.py "$SKILL"/extract_*.py; do
+        [ -e "$f" ] && echo "  $(basename "$f")"
+    done
+    exit 0
+fi
+
+[ $# -ge 1 ] || erro "uso: pdfpy <script.py> [args...]   (pdfpy --lista)"
+
+ALVO="$1"; shift
+
+# aceita nome curto, nome com pasta ou caminho absoluto
+if [ -f "$ALVO" ]; then
+    SCRIPT="$(cd "$(dirname "$ALVO")" && pwd)/$(basename "$ALVO")"
+    case "$SCRIPT" in
+        "$SKILL"/*) DENTRO="/skills/scripts/$(basename "$ALVO")" ;;
+        *)         DENTRO="/dados/$(basename "$ALVO")" ;;
+    esac
+elif [ -f "$SKILL/$(basename "$ALVO")" ]; then
+    DENTRO="/skills/scripts/$(basename "$ALVO")"
+else
+    erro "script nao encontrado: $ALVO (veja pdfpy --lista)"
+fi
+
+# garante a imagem (build na primeira vez)
+if ! docker image inspect "$IMG" >/dev/null 2>&1; then
+    echo "==> imagem $IMG ausente; construindo (primeira vez, leva alguns minutos)" >&2
+    (cd "$FONTE_IMG" && docker build -q -t "$IMG" . >&2) || erro "falha ao construir $IMG"
+fi
+
+exec docker-direct run --rm \
+    --entrypoint python3 \
+    -v "$PWD:/dados" \
+    -v "$SKILL:/skills/scripts" \
+    -v "$FONTE_IMG/md2pdf:/usr/local/bin/md2pdf:ro" \
+    -w /dados \
+    -e PYTHONUNBUFFERED=1 \
+    "$IMG" "$DENTRO" "$@"

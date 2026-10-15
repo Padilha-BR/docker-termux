@@ -1,0 +1,70 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# webplay — roda SEU script de automacao web no celular (NIVEL 3: interacao).
+#
+# NATIVO: usa o Chromium + chromedriver do Termux (bionic, sem container, sem
+# proot). O Playwright NAO existe para Android; o Selenium e Python puro e roda.
+#
+# Use quando precisar de verdade de automacao: clicar, digitar, login, esperar
+# seletor, varias abas. Para pagina estatica use `webget`; para JS sem clique,
+# `webprint`.
+#
+# Uso:
+#   webplay robo.py                      # script no diretorio atual
+#   webplay robo.py --url https://x.com  # argumentos vao para o seu script
+#   webplay --exemplo                    # imprime um script de partida
+#
+# No script, use o helper ja instalado (flags do Android prontas):
+#
+#   from webauto import sessao, esperar
+#   with sessao() as d:
+#       d.get("https://example.com")
+#       print(d.title)
+#       esperar(d, "h1").text
+#       d.save_screenshot("print.png")
+set -uo pipefail
+
+VENV="$HOME/docker-termux/venv-web"
+PY="$VENV/bin/python"
+
+erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
+
+case "${1:-}" in
+    ""|-h|--help|--ajuda)
+        sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+        exit 2
+        ;;
+    --exemplo)
+        cat <<'PY'
+#!/usr/bin/env python3
+"""Exemplo: abre o Chromium nativo, navega, espera e tira print."""
+import sys
+from webauto import sessao, esperar, texto_visivel
+
+url = sys.argv[1] if len(sys.argv) > 1 else "https://example.com"
+with sessao() as d:
+    d.get(url)
+    print("titulo:", d.title)
+    print("texto:", texto_visivel(d)[:200])
+    esperar(d, "body", por="tag", timeout=15)   # h1 nem sempre existe
+    d.save_screenshot("webplay.png")
+    print("print salvo em webplay.png")
+PY
+        exit 0
+        ;;
+esac
+
+[ -x "$PY" ] || erro "ambiente ausente. Rode: docker-termux-setup (ou
+  python3 -m venv $VENV && $VENV/bin/pip install selenium)"
+[ -x "$PREFIX/bin/chromedriver" ] && [ -x "$PREFIX/lib/chromium/chrome" ] || erro \
+  "chromium nativo ausente. Instale: pkg install x11-repo && pkg install chromium"
+
+SCRIPT="$1"; shift
+[ -f "$SCRIPT" ] || erro "script nao encontrado: $SCRIPT"
+case "$SCRIPT" in
+    /*) ABS="$SCRIPT" ;;
+    *)  ABS="$PWD/$SCRIPT" ;;
+esac
+
+# PYTHONPATH deixa `from webauto import ...` funcionar de qualquer diretorio.
+exec env PYTHONPATH="$HOME/.hermes/bin:${PYTHONPATH:-}" PYTHONUNBUFFERED=1 \
+    "$PY" "$ABS" "$@"
