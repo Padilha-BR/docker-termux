@@ -307,9 +307,18 @@ ptrace/processos filhos.
 
 | via | página estática | SPA (só JS) | RAM pico |
 |---|---|---|---|
-| HTTP puro (`webget`, dentro do container) | 4,3 s | falha (volta vazio) | ~34 MB |
-| **Chromium NATIVO do Termux** (`webprint`) | 2,8 s | **6,2 s, renderizado** | ~1 GB |
+| HTTP puro (`webget`, nativo) | **1,7 s** | falha (volta vazio) | ~34 MB |
+| **Chromium NATIVO do Termux** (`webprint`) | 2,8 s | 4,7-6,2 s, renderizado | ~1 GB |
+| CDP puro (`webcdp`) | **1,9-2,5 s** | renderizado | ~1 GB |
+| **Playwright via Node** (`playwright-core`) | 0,5 s (arranque) | **1,4 s, renderizado** | ~830 MB |
 | Selenium + `chromedriver` nativo (`webplay`) | 4,0 s | OK | ~1 GB |
+
+O Playwright **roda** aqui — via Node, não Python. Ele se recusa a subir com `Unsupported
+platform: android` (só conhece darwin/linux/win32) a menos que você defina
+`PLAYWRIGHT_BROWSERS_PATH=0` **e** aponte o `executablePath` para o `chromium-browser` do
+Termux (o build que ele baixaria é glibc e não roda). Medido em 3/3 rodadas: navegador no ar
+em 0,5 s, react.dev renderizado em 1,4 s, screenshot 1280×720 válido. Detalhes na
+[`CAPACIDADES.pt-BR.md`](CAPACIDADES.pt-BR.md) §3.6.3.
 
 ```sh
 pkg install x11-repo && pkg install chromium   # binário: chromium-browser
@@ -317,8 +326,9 @@ chromium-browser --headless=new --no-sandbox --disable-gpu \
     --disable-dev-shm-usage --virtual-time-budget=8000 --dump-dom URL
 ```
 
-O `chromedriver` vem no mesmo pacote e roda com `selenium` (Python puro) — o
-Playwright **não existe para Android** (nenhum wheel no PyPI). Os wrappers
+O `chromedriver` vem no mesmo pacote e roda com `selenium` (Python puro). O Playwright
+**não tem wheel para Android em Python** — mas **roda via Node** (veja a tabela acima).
+Os wrappers
 `webprint` (nível 2) e `webplay` (nível 3, com o helper `webauto.py`) usam essa
 via. Custo honesto: o Chromium nativo come ~1 GB de RAM — prefira HTTP puro
 quando o HTML já traz o conteúdo, e nunca rode dois Chromiums em paralelo.
