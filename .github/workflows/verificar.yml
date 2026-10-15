@@ -15,8 +15,9 @@ name: verificar
 # headless, PDF, orfaos) e o `bash verificar.sh`, rodado no celular.
 
 on:
+  # qualquer branch: assim o guarda roda tambem em branch de trabalho (e da para
+  # provar que ele reprova, reintroduzindo o bug num branch descartavel).
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
