@@ -19,17 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This repository bundles no third-party binaries. It installs and drives:
-
-  - udocker        https://github.com/indigo-dc/udocker        GPL-2.0
-  - udockerd       https://pypi.org/project/udockerd/          Apache-2.0
-  - proot          https://github.com/termux/proot             GPL-2.0
-  - proot-distro   https://github.com/termux/proot-distro      GPL-2.0
-  - qemu-user      https://www.qemu.org/                       GPL-2.0
-  - Docker CLI     https://download.docker.com/                Apache-2.0
-
-Those components keep their own licenses; this MIT license covers only the
-scripts and documentation in this repository.
