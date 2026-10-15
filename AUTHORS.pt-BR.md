@@ -56,5 +56,10 @@ foi revalidada no aparelho depois.
    nenhum: `-v ...:ro` falhando em silêncio, o wrapper que morre deixando o
    Chromium órfão, containers mortos à força acumulando 10,6 GB, `pkill -f
    udockerd` matando a própria shell.
+6. **Transporte em socket Unix para o daemon**: a API do Docker não autentica ninguém, e no
+   Android o loopback é alcançável por qualquer app com permissão de rede — então o daemon
+   saiu do TCP e foi para trás de um socket `0600`.
+7. **Hashes pinados dos artefatos**: o instalador aborta num download que não bate com o
+   [`checksums.txt`](checksums.txt), já que nenhum upstream publica `.sha256`.
 
 Detalhamento em [`CAPACIDADES.md`](CAPACIDADES.pt-BR.md).

@@ -797,14 +797,37 @@ def cmd_doctor(argv=None):
           "sem ele `docker logs` do container principal fica vazio")
 
     daemon_ok = False
+    # o daemon escuta num socket Unix (0600) por padrao: TCP no loopback fica
+    # alcancavel por qualquer app do Android, e a API do Docker nao autentica.
+    sock = os.environ.get("UDOCKERD_SOCKET", os.path.join(HOME, ".udockerd", "docker.sock"))
+    onde = f"unix://{sock}"
     try:
-        import urllib.request
-        with urllib.request.urlopen("http://127.0.0.1:2375/_ping", timeout=2) as r:
-            daemon_ok = r.read().decode().strip() == "OK"
+        if os.environ.get("DOCKER_DAEMON_TCP", "0") == "1":
+            import urllib.request
+            onde = "tcp://127.0.0.1:2375"
+            with urllib.request.urlopen(f"http://127.0.0.1:2375/_ping", timeout=2) as r:
+                daemon_ok = r.read().decode().strip() == "OK"
+        else:
+            import http.client
+            import socket as _socket
+
+            class _UnixHTTP(http.client.HTTPConnection):
+                def __init__(self) -> None:
+                    super().__init__("localhost", timeout=2)
+
+                def connect(self) -> None:
+                    self.sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                    self.sock.settimeout(2)
+                    self.sock.connect(sock)
+
+            c = _UnixHTTP()
+            c.request("GET", "/_ping")
+            daemon_ok = c.getresponse().read().decode().strip() == "OK"
+            c.close()
     except Exception:
         daemon_ok = False
     checa("daemon (API do Docker)", daemon_ok,
-          "no ar em tcp://127.0.0.1:2375" if daemon_ok else "parado — sobe sozinho no proximo docker run")
+          f"no ar em {onde}" if daemon_ok else "parado — sobe sozinho no proximo docker run")
 
     ns = [n for n in sorted(containers_locais())]
     sem_dns = [n for n in ns

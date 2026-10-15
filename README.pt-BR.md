@@ -39,7 +39,7 @@ ou de clique: cada subida custa ~1 GB de RAM contra 34 MB do nível 1.
 | **`webcdp`** | nível 3 — CDP puro (**sem Selenium**): texto, JS, screenshot |
 | **`webplay`** | nível 3b — Selenium + chromedriver, para quem quer a API familiar |
 | **`pdf` / `pdfpy`** | Markdown → PDF tipografado; helpers de PDF em container |
-| **`verificar.sh`** | **a prova**: 16 itens, ~2 min; muda estado (daemon, imagens, containers) |
+| **`verificar.sh`** | **a prova**: 17 itens, ~2 min; muda estado (daemon, imagens, containers) |
 
 ---
 
@@ -134,6 +134,20 @@ documentar as armadilhas com medições reproduzíveis.
 Ambas executam de verdade via **proot 5.1 do Termux** — nenhuma tem namespaces
 de kernel.
 
+### Por que o daemon escuta num socket Unix
+
+A API do Docker **não autentica ninguém**: quem alcança o endpoint manda no daemon — roda
+container, monta um volume da tua home do Termux, lê teus arquivos. Num servidor
+multiusuário o loopback já é restrito; **no Android não é**, e qualquer app com a permissão
+INTERNET conecta em `127.0.0.1:2375`.
+
+Então o daemon fala por `unix://$HOME/.udockerd/docker.sock` em modo **0600**, dentro de uma
+pasta `0700`. O `udockerd` só conhece TCP, então
+[`scripts/udockerd-unix`](scripts/udockerd-unix) serve **o próprio handler e as próprias
+rotas** dele sobre `AF_UNIX` — nada foi reimplementado. Verificado: `docker run` funciona
+pelo socket, o socket é `0600`, e o `127.0.0.1:2375` para de responder.
+`DOCKER_DAEMON_TCP=1` traz o transporte antigo de volta (não recomendado).
+
 ---
 
 ## Instalação
@@ -148,6 +162,16 @@ docker doctor                     # confere cada peça
 O instalador cuida de: `proot`, `qemu-user-x86-64`, runtime udocker, shim do
 proot, patch do qemu, venv do udockerd, compilação do supervisor, download da CLI
 oficial, scripts, atalhos e `resolv.conf`.
+
+Duas coisas importantes sobre esses downloads:
+
+- **Eles são verificados.** Nem o udocker nem a Docker publicam `.sha256` para esses
+  artefatos, então os hashes moram em [`checksums.txt`](checksums.txt) e o instalador
+  **aborta** se o arquivo baixado não bater (versão sem pin é reportada com o hash, nunca
+  aceita em silêncio). O `udockerd` é instalado pinado em `==0.3.5`, a versão contra a qual
+  os contornos do dispatcher foram testados.
+- **O daemon escuta num socket Unix**, não em TCP — veja "Por que o daemon escuta num
+  socket Unix" abaixo.
 
 ---
 
@@ -381,8 +405,9 @@ trabalho de campo às correções — tudo executado dentro do aparelho, por ter
 
 | caminho | o que é |
 |---|---|
-| `verificar.sh` | **a bateria que prova o stack inteiro** (16 itens, ~2 min; sobe o daemon, baixa imagens e roda containers) |
-| `scripts/` | o dispatcher `docker`, o motor direto, o ciclo do daemon e o instalador |
+| `verificar.sh` | **a bateria que prova o stack inteiro** (17 itens, ~2 min; sobe o daemon, baixa imagens e roda containers) |
+| `scripts/` | o dispatcher `docker`, o motor direto, o ciclo do daemon, o `udockerd-unix` (daemon em socket Unix) e o instalador |
+| `checksums.txt` | sha256 pinado dos artefatos que o instalador baixa |
 | `ferramentas/` | `pdf`, `pdfpy`, `webget`, `webprint`, `webcdp`, `webplay` e o helper `webauto.py` |
 | `imagens/` | Dockerfiles **e as fontes autorais** (`md2pdf`, `webget.py`, `webprint.py`) |
 | `testes/` | benchmarks de headless (tempo + RAM) e a bateria de testes do PDF |

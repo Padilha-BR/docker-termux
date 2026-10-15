@@ -1,0 +1,26 @@
+# Hashes dos artefatos que o docker-termux-setup baixa da internet.
+#
+# Por que este arquivo existe
+# ---------------------------
+# Nem o udocker nem a Docker publicam .sha256 para estes dois artefatos (os dois
+# enderecos oficiais dao 404 — conferido em 15/10/2026). Sem hash, um download
+# interceptado ou um arquivo trocado no servidor passa despercebido — e o que se
+# instala aqui roda com as permissoes do usuario.
+#
+# Como o pin foi estabelecido
+# ---------------------------
+# Calculado sobre os arquivos baixados por HTTPS no dia em que esta verificacao
+# foi escrita, com a versao conferida (o binario responde `--version`). Nao e uma
+# assinatura do upstream — e um pino de integridade: se o arquivo mudar de
+# conteudo sem a versao mudar, o instalador aborta em vez de instalar.
+#
+# Como o instalador confere
+# -------------------------
+#   udocker-<versao>.tar.gz   -> sha256 do ARQUIVO baixado (o tarball inteiro)
+#   docker-cli-<versao>       -> sha256 do BINARIO extraido do .tgz (o que roda)
+#
+# Se a versao nao estiver aqui, o instalador NAO aborta: ele avisa e imprime o
+# hash obtido, para voce conferir e adicionar a linha.
+
+f97ec97679133b5ada780025e6e263607cb4ec3401786f1db135e46153c90bd1  udocker-1.3.17.tar.gz
+77b9c2bb422945584e62cd3d3becb0228fa313d08e72434cb6f3b456ae75213d  docker-cli-29.9.1

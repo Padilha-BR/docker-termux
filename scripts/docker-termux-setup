@@ -25,12 +25,30 @@ set -uo pipefail
 
 VERSAO_UDOCKER="${UDOCKER_VERSAO:-1.3.17}"
 VERSAO_DOCKER_CLI="${DOCKER_CLI_VERSAO:-29.9.1}"
+# Pin do daemon: `pip install udockerd` sem versao pega o "ultimo" do PyPI, que
+# pode mudar entre a documentacao e a execucao. O dispatcher foi testado contra
+# esta versao (o `docker pull`/`Binds`/`logs` contornam defeitos dela).
+VERSAO_UDOCKERD="${UDOCKERD_VERSAO:-0.3.5}"
 BASE="$HOME/docker-termux"
 BIN="$BASE/udocker-$VERSAO_UDOCKER/udocker/udocker"
 REPO="$HOME/.udocker"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 MEUBIN="$HOME/.hermes/bin"
 AQUI="$(cd "$(dirname "$0")" && pwd)"
+
+# Onde estao os scripts e o checksums.txt? Este instalador roda de tres lugares:
+# a raiz do repo (scripts/ ao lado), o proprio scripts/ e ~/.hermes/bin (copiado
+# pelo passo 7). Resolver aqui e o que permite manter UMA copia so do instalador.
+if [ -d "$AQUI/scripts" ]; then
+    SCRIPTS="$AQUI/scripts"; RAIZ="$AQUI"
+elif [ -d "$AQUI/../scripts" ]; then
+    RAIZ="$(cd "$AQUI/.." && pwd)"; SCRIPTS="$RAIZ/scripts"
+elif [ -d "$HOME/repos/docker-termux/scripts" ]; then
+    RAIZ="$HOME/repos/docker-termux"; SCRIPTS="$RAIZ/scripts"
+else
+    SCRIPTS="$AQUI"; RAIZ="$AQUI"
+fi
+
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
@@ -39,6 +57,41 @@ amarelo() { printf '\033[33m%s\033[0m\n' "$*"; }
 vermelho() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 passo() { printf '\n\033[36m==>\033[0m %s\n' "$*"; }
 falhou=0
+
+# ------------------------------------------------------- verificacao de hash
+# Confere o sha256 de um artefato baixado contra o pin em checksums.txt.
+#   $1 = chave no checksums.txt (ex: udocker-1.3.17.tar.gz)
+#   $2 = caminho do arquivo baixado
+#   $3 = rotulo para a mensagem
+# Divergiu -> aborta a instalacao. Versao sem pin -> avisa e mostra o hash.
+conferir_hash() {
+    chave="$1"; arquivo="$2"; rotulo="$3"
+    if [ ! -f "$RAIZ/checksums.txt" ]; then
+        amarelo "  $rotulo: sem checksums.txt — hash nao conferido"
+        return 0
+    fi
+    if [ ! -f "$arquivo" ]; then
+        vermelho "  $rotulo: arquivo ausente para conferir ($arquivo)"
+        exit 1
+    fi
+    obtido=$(sha256sum "$arquivo" 2>/dev/null | awk '{print $1}')
+    esperado=$(awk -v k="$chave" '$2 == k {print $1}' "$RAIZ/checksums.txt")
+    if [ -z "$esperado" ]; then
+        amarelo "  $rotulo: versao sem pin conhecido"
+        echo "     sha256 obtido: $obtido"
+        echo "     (confira e acrescente a linha em checksums.txt)"
+        return 0
+    fi
+    if [ "$esperado" = "$obtido" ]; then
+        verde "  $rotulo: sha256 confere ($obtido)"
+        return 0
+    fi
+    vermelho "  $rotulo: SHA256 NAO CONFERE — instalacao abortada"
+    echo "     esperado: $esperado"
+    echo "     obtido:   $obtido"
+    echo "     O arquivo baixado nao e o esperado. Nao instale sem conferir."
+    exit 1
+}
 
 # ------------------------------------------------------------- 1. dependencias
 passo "1/8 dependencias"
@@ -67,6 +120,7 @@ if [ ! -x "$BIN" ] || [ "$FORCE" = 1 ]; then
         curl -sL -o "udocker-$VERSAO_UDOCKER.tar.gz" \
             "https://github.com/indigo-dc/udocker/releases/download/$VERSAO_UDOCKER/udocker-$VERSAO_UDOCKER.tar.gz" \
             || { vermelho "download do udocker falhou"; exit 1; }
+        conferir_hash "udocker-$VERSAO_UDOCKER.tar.gz" "$TMPD/udocker-$VERSAO_UDOCKER.tar.gz" "udocker"
         tar zxf "udocker-$VERSAO_UDOCKER.tar.gz" || { vermelho "extracao falhou"; exit 1; }
     fi
     rm -rf "$BASE/udocker-$VERSAO_UDOCKER"
@@ -134,10 +188,10 @@ VENV="$BASE/venv-udockerd"
 if [ ! -x "$VENV/bin/udockerd" ] || [ "$FORCE" = 1 ]; then
     python3 -m venv --system-site-packages "$VENV" 2>/dev/null
     "$VENV/bin/pip" install -q --upgrade pip >/dev/null 2>&1
-    if "$VENV/bin/pip" install -q udockerd 2>&1 | tail -2; then
-        verde "  udockerd instalado"
+    if "$VENV/bin/pip" install -q "udockerd==$VERSAO_UDOCKERD" 2>&1 | tail -2; then
+        verde "  udockerd $VERSAO_UDOCKERD instalado"
     else
-        amarelo "  pip install udockerd falhou (camada 1 continua funcionando)"
+        amarelo "  pip install udockerd==$VERSAO_UDOCKERD falhou (camada 1 continua funcionando)"
         falhou=1
     fi
 else
@@ -186,6 +240,9 @@ if [ ! -x "$CLI" ] || [ "$FORCE" = 1 ]; then
     echo "  baixando CLI estatica $VERSAO_DOCKER_CLI (arm64)..."
     if curl -sfL -o "$arquivo" "https://download.docker.com/linux/static/stable/aarch64/$arquivo" \
         && tar xzf "$arquivo" docker/docker 2>/dev/null; then
+        # Confere o BINARIO extraido (e ele que vai rodar). A Docker nao publica
+        # .sha256 para os estaticos, entao o pin vive no checksums.txt do repo.
+        conferir_hash "docker-cli-$VERSAO_DOCKER_CLI" "docker/docker" "CLI do Docker"
         cp docker/docker "$CLI"; chmod +x "$CLI"; rm -rf docker "$arquivo"
         verde "  CLI instalada: $("$CLI" --version)"
     else
@@ -194,6 +251,8 @@ if [ ! -x "$CLI" ] || [ "$FORCE" = 1 ]; then
         if [ -n "$ultima" ] && curl -sfL -o "$ultima" \
             "https://download.docker.com/linux/static/stable/aarch64/$ultima" \
             && tar xzf "$ultima" docker/docker 2>/dev/null; then
+            # versao fora do pin: avisa e mostra o hash (nao aborta)
+            conferir_hash "docker-cli-${ultima#docker-}" "docker/docker" "CLI do Docker ($ultima)"
             cp docker/docker "$CLI"; chmod +x "$CLI"; rm -rf docker "$ultima"
             verde "  CLI instalada (fallback): $("$CLI" --version)"
         else
@@ -206,9 +265,9 @@ fi
 
 # -------------------------------------------------------------- 7. os scripts
 passo "7/8 scripts do CLI em $MEUBIN"
-for s in docker docker-direct docker-daemon-up docker-daemon-down; do
-    if [ -f "$AQUI/scripts/$s" ]; then
-        cp "$AQUI/scripts/$s" "$MEUBIN/$s"; chmod +x "$MEUBIN/$s"; echo "  $s"
+for s in docker docker-direct docker-daemon-up docker-daemon-down udockerd-unix; do
+    if [ -f "$SCRIPTS/$s" ]; then
+        cp "$SCRIPTS/$s" "$MEUBIN/$s"; chmod +x "$MEUBIN/$s"; echo "  $s"
     elif [ -x "$MEUBIN/$s" ]; then
         echo "  $s (ja presente)"
     else

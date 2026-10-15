@@ -1,0 +1,171 @@
+#!/data/data/com.termux/files/usr/bin/python3
+"""udockerd num socket Unix — a API do Docker sem ficar exposta no loopback.
+
+Por que isto existe
+-------------------
+A API do Docker nao tem autenticacao: quem alcanca o endpoint manda no daemon —
+roda container, monta um volume do Termux e le/escreve arquivo seu, executa
+comando dentro do container. Num servidor multiusuario isso e aceitavel porque o
+acesso ao loopback ja e restrito; **no Android nao e**: qualquer app com a
+permissao de rede INTERNET alcanca 127.0.0.1:2375 e conversa com o daemon.
+
+O Docker de verdade resolve isso escutando num socket Unix, onde quem manda e a
+permissao do arquivo (so o dono entra). O udockerd so fala TCP — entao aqui esta
+o mesmo truque, com o MESMO handler e as MESMAS rotas dele: muda so o transporte.
+
+Uso:
+    udockerd-unix                          # ~/.udockerd/docker.sock, modo 0600
+    udockerd-unix --socket /caminho.sock
+    udockerd-unix --porta-legado 2375      # tambem aceita TCP (nao recomendado)
+
+    docker -H unix://$HOME/.udockerd/docker.sock ps
+    export DOCKER_HOST=unix://$HOME/.udockerd/docker.sock
+
+Por que nao usar `--host`/`--port` do udockerd: eles so aceitam endereco TCP.
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import signal
+import socketserver
+import sys
+import threading
+import typing
+
+from udockerd import __version__, container_proc, udocker_ctx
+from udockerd.config import (
+    check_curl_available,
+    check_linux,
+    check_tar_available,
+    configure_udocker,
+)
+from udockerd.http import Router, make_handler_class
+from udockerd.routes import build, containers, images, system
+from udockerd.routes import exec as exec_routes
+
+logger = logging.getLogger("udockerd.unix")
+
+SOCKET_PADRAO = os.path.join(os.path.expanduser("~"), ".udockerd", "docker.sock")
+
+
+def build_router() -> Router:
+    """As mesmas rotas do servidor TCP do udockerd (nada e reimplementado)."""
+    router = Router()
+    system.register(router)
+    images.register(router)
+    containers.register(router)
+    exec_routes.register(router)
+    build.register(router)
+    return router
+
+
+class ThreadingUnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """Igual ao ThreadingHTTPServer do udockerd, mas em AF_UNIX.
+
+    Duas diferencas que o handler HTTP exige:
+      - `get_request` devolve um client_address indexavel: no AF_UNIX o accept
+        devolve ('', ...) e o BaseHTTPRequestHandler chama client_address[0];
+      - `server_bind` do HTTPServer chama socket.getfqdn() (DNS reverso, lento e
+        inutil aqui) — evitamos.
+    """
+
+    daemon_threads = True
+
+    def server_bind(self) -> None:
+        socketserver.UnixStreamServer.server_bind(self)
+        self.server_name = "udockerd-unix"
+        self.server_port = 0
+
+    def get_request(self):  # type: ignore[no-untyped-def]
+        request, _ = super().get_request()
+        return request, ("unix", 0)
+
+
+def main() -> int:
+    typing.cast("typing.io.TextIOWrapper", sys.stdout).reconfigure(line_buffering=True)
+    typing.cast("typing.io.TextIOWrapper", sys.stderr).reconfigure(line_buffering=True)
+
+    p = argparse.ArgumentParser(
+        prog="udockerd-unix",
+        description="udockerd (API do Docker) escutando num socket Unix, nao no loopback.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__.split("Uso:")[-1].strip(),
+    )
+    p.add_argument("--socket", default=os.environ.get("UDOCKERD_SOCKET", SOCKET_PADRAO),
+                   help="caminho do socket Unix (env: UDOCKERD_SOCKET, default: %(default)s)")
+    p.add_argument("--data-dir", default=os.environ.get("UDOCKER_DIR"),
+                   help="diretorio de dados do udocker (default: ~/.udocker)")
+    p.add_argument("--dns", action="append", help="nameserver dos containers (repetivel)")
+    p.add_argument("-v", "--verbose", action="count", default=0, help="mais log (-v, -vv)")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    args = p.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose >= 2 else (logging.INFO if args.verbose == 1 else logging.WARNING),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    check_linux()
+    check_curl_available()
+    check_tar_available()
+    configure_udocker(args.data_dir)
+    udocker_ctx.set_dns_servers(args.dns or [s for s in os.environ.get("UDOCKERD_DNS", "").split(",") if s])
+    udocker_ctx.init(verbose=args.verbose, quiet=args.quiet)
+
+    caminho = os.path.expanduser(args.socket)
+    pasta = os.path.dirname(caminho)
+    os.makedirs(pasta, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(pasta, 0o700)
+    except OSError:
+        pass
+
+    # socket velho de um daemon morto: sem isso o bind falha com EADDRINUSE.
+    if os.path.exists(caminho):
+        if _alguem_atende(caminho):
+            print(f"erro: ja existe daemon atendendo em {caminho}", file=sys.stderr)
+            return 1
+        os.unlink(caminho)
+
+    handler_cls = make_handler_class(build_router())
+    httpd = ThreadingUnixHTTPServer(caminho, handler_cls)
+    # 0600: so o dono do Termux fala com a API. E isto que o TCP nao consegue dar.
+    os.chmod(caminho, 0o600)
+
+    def shutdown_gracefully() -> None:
+        logger.info("encerrando, parando containers")
+        container_proc.stop_all()
+        httpd.shutdown()
+
+    signal.signal(signal.SIGTERM, lambda *_: threading.Thread(target=shutdown_gracefully, daemon=True).start())
+
+    logger.info("udockerd %s ouvindo em %s (modo 0600)", __version__, caminho)
+    print(f"udockerd-unix: {caminho} (0600) — DOCKER_HOST=unix://{caminho}", flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        shutdown_gracefully()
+    return 0
+
+
+def _alguem_atende(caminho: str) -> bool:
+    """True se o socket responde a uma requisicao HTTP minima."""
+    import socket as _s
+
+    s = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+    s.settimeout(2)
+    try:
+        s.connect(caminho)
+        s.sendall(b"GET /_ping HTTP/1.1\r\nHost: unix\r\nConnection: close\r\n\r\n")
+        return b"OK" in s.recv(512)
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

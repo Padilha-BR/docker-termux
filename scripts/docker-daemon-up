@@ -4,30 +4,55 @@
 # Idempotente: se a API responde, sai na hora. Sobe desgarrado (setsid, PPid 1)
 # para sobreviver ao fim da sessao do Hermes/Termux, com pidfile proprio.
 #
+# TRANSPORTE: socket Unix em ~/.udockerd/docker.sock, modo 0600 — NAO TCP.
+# Motivo: a API do Docker nao autentica ninguem. Num servidor multiusuario o
+# loopback ja e restrito, mas **no Android nao e**: qualquer app com permissao de
+# rede alcanca 127.0.0.1:2375 e manda no daemon (roda container, monta volume do
+# Termux, le arquivo seu). O socket Unix tem a protecao que falta no TCP: a
+# permissao do arquivo, que so o dono do Termux tem.
+# DOCKER_DAEMON_TCP=1 volta ao transporte antigo (nao recomendado).
+#
 # udockerd implementa a API do Docker (create/start/stop/rm/exec/logs/TTY/build)
 # dirigindo o udocker; a execucao real e proot 5.1 (via shim em ~/.udocker/bin).
 
 set -u
 BASE="$HOME/docker-termux"
-UDOCKERD="$BASE/venv-udockerd/bin/udockerd"
+VENV="$BASE/venv-udockerd"
+UDOCKERD="$VENV/bin/udockerd"
+UDOCKERD_UNIX="$HOME/.hermes/bin/udockerd-unix"
 STATE="$BASE/state"
 LOG="$BASE/logs/udockerd.log"
 PIDFILE="$STATE/udockerd.pid"
+SOCKET="${UDOCKERD_SOCKET:-$HOME/.udockerd/docker.sock}"
 PORTA="${DOCKER_DAEMON_PORT:-2375}"
+TCP="${DOCKER_DAEMON_TCP:-0}"
 
 mkdir -p "$STATE" "$BASE/logs"
 
 responde() {
-    curl -s -m 2 "http://127.0.0.1:$PORTA/_ping" 2>/dev/null | grep -q OK
+    if [ "$TCP" = 1 ]; then
+        curl -s -m 2 "http://127.0.0.1:$PORTA/_ping" 2>/dev/null | grep -q OK
+    else
+        curl -s -m 2 --unix-socket "$SOCKET" http://localhost/_ping 2>/dev/null | grep -q OK
+    fi
 }
 
-if responde; then
-    exit 0
-fi
+responde && exit 0
 
-if [ ! -x "$UDOCKERD" ]; then
-    echo "erro: udockerd nao instalado em $UDOCKERD (rode docker-termux-setup)" >&2
-    exit 1
+if [ "$TCP" = 1 ]; then
+    [ -x "$UDOCKERD" ] || {
+        echo "erro: udockerd nao instalado em $UDOCKERD (rode docker-termux-setup)" >&2
+        exit 1
+    }
+else
+    [ -f "$UDOCKERD_UNIX" ] || {
+        echo "erro: udockerd-unix ausente em $UDOCKERD_UNIX (rode docker-termux-setup)" >&2
+        exit 1
+    }
+    [ -x "$VENV/bin/python" ] || {
+        echo "erro: venv do udockerd ausente em $VENV (rode docker-termux-setup)" >&2
+        exit 1
+    }
 fi
 
 # pid antigo ainda subindo? espera em vez de duplicar
@@ -41,11 +66,46 @@ if [ -f "$PIDFILE" ]; then
     fi
 fi
 
+# Daemon LEGADO de versao anterior, ainda escutando em TCP? Ele e exatamente o
+# problema que o socket resolve (a API do Docker nao autentica e o loopback do
+# Android e alcancavel por qualquer app). Nao deixamos o exposto vivo.
+if [ "$TCP" != 1 ] && curl -s -m 2 "http://127.0.0.1:$PORTA/_ping" 2>/dev/null | grep -q OK; then
+    echo "aviso: daemon antigo escutando em 127.0.0.1:$PORTA (exposto a outros apps) — encerrando" >&2
+    python3 - <<'PY' 2>/dev/null || true
+import os, signal, time
+
+meu, pai = os.getpid(), os.getppid()
+for p in os.listdir('/proc'):
+    if not p.isdigit():
+        continue
+    pid = int(p)
+    if pid in (meu, pai):
+        continue
+    try:
+        args = open(f'/proc/{pid}/cmdline', 'rb').read().decode('utf-8', 'replace').split('\0')
+    except OSError:
+        continue
+    # o daemon TCP e `<venv>/bin/udockerd`; o novo e `<venv>/bin/python .../udockerd-unix`
+    if args and args[0].rstrip().endswith('/bin/udockerd'):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+time.sleep(2)
+PY
+fi
+
 termux-wake-lock 2>/dev/null || true
 
-setsid "$UDOCKERD" --host 127.0.0.1 --port "$PORTA" \
-    --data-dir "$HOME/.udocker" --dns 8.8.8.8 --dns 8.8.4.4 \
-    >>"$LOG" 2>&1 < /dev/null &
+if [ "$TCP" = 1 ]; then
+    setsid "$UDOCKERD" --host 127.0.0.1 --port "$PORTA" \
+        --data-dir "$HOME/.udocker" --dns 8.8.8.8 --dns 8.8.4.4 \
+        >>"$LOG" 2>&1 < /dev/null &
+else
+    setsid "$VENV/bin/python" "$UDOCKERD_UNIX" --socket "$SOCKET" \
+        --data-dir "$HOME/.udocker" --dns 8.8.8.8 --dns 8.8.4.4 \
+        >>"$LOG" 2>&1 < /dev/null &
+fi
 echo $! > "$PIDFILE"
 
 for _ in $(seq 1 30); do
