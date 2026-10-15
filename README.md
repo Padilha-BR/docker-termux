@@ -2,7 +2,7 @@
 
 > **What works and what doesn't, measured on the device:** [`CAPACIDADES.md`](CAPACIDADES.md) —
 > verified capabilities, limits with root cause, what is theoretically possible, and what
-> already existed before (credits). *(Written in Portuguese.)*
+> already existed before (credits).
 
 **Português:** [leia em português](README.pt-BR.md).
 
