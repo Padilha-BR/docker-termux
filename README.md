@@ -29,8 +29,8 @@ The rule that saves the most time: **start at level 1**. The native `webget` ext
 does not mean "needs a browser". Climb to Chromium when you need pixels or clicks: each
 climb costs ~1 GB of RAM against 34 MB.
 
-Measured on a Galaxy S24 Ultra (Android 16, arm64, kernel 6.1.145), everything typed and
-executed inside Termux, no root, no PC.
+Measured on a Galaxy S24 Ultra (Android 16, arm64, kernel 6.1.145) — everything typed
+and executed inside Termux, on the phone alone, without root.
 
 ## What is ready to use
 
