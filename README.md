@@ -6,9 +6,51 @@
 
 > **English version below (scroll down).**
 
-Relato de campo: como fazer `docker` funcionar num celular Android sem root, sem
-daemon de kernel, sem cgroups e sem user namespaces — medido num Galaxy S24 Ultra
-(Android 16, arm64, kernel 6.1.145), tudo digitado e executado dentro do Termux.
+## A ideia
+
+Um agente rodando num celular não precisa ser um agente pela metade. Este
+repositório é o registro da **descoberta de campo** de como dar a ele o que só
+existia no desktop — com o custo de cada escolha na mesa, porque aqui o recurso
+escasso não é CPU: é **memória**.
+
+Nenhuma linha abaixo saiu de tutorial; todas saíram de medição no aparelho:
+
+| preciso de… | use | custo medido |
+|---|---|---|
+| rodar uma ferramenta Linux que não existe no Termux | `docker run <imagem>` (este repo) | 4 s de piso do `proot` |
+| ler o **texto** de uma página | **HTTP puro** (`webget`, nativo) | **1,7 s, ~34 MB** |
+| a **imagem** da página (PNG/PDF) | `webprint` (Chromium **nativo**) | 2,8-5 s, **~1 GB** |
+| clicar, preencher, rodar JS sob demanda | `webcdp` (CDP puro, sem Selenium) | **1,9-2,5 s** |
+| um Linux completo para trabalhar | `proot-distro login <distro>` | — |
+| `docker compose`, cgroups, rede isolada | **não existe sem root** | VM (10-25× mais lento) |
+
+A regra que economiza mais tempo: **comece pelo nível 1**. O `webget` nativo extrai
+**8.097 caracteres** do `react.dev` e **3.559** do `vercel.com` — "página moderna"
+não significa "precisa de navegador". Suba para o Chromium quando precisar de pixel
+ou de clique: cada subida custa ~1 GB de RAM contra 34 MB do nível 1.
+
+## O que está pronto para usar
+
+| comando | o que faz |
+|---|---|
+| **`docker`** | `pull`, `run`, `build`, `exec`, `logs`, TTY, volumes, imagem de outra arquitetura por emulação, e API do Docker (qualquer cliente fala com ele) |
+| **`webget`** | nível 1 — HTTP + parser, **nativo**: texto, links, JSON, seletor CSS |
+| **`webprint`** | nível 2 — Chromium nativo: `--dom`, `--texto`, `--pdf`, `--png` |
+| **`webcdp`** | nível 3 — CDP puro (**sem Selenium**): texto, JS, screenshot |
+| **`webplay`** | nível 3b — Selenium + chromedriver, para quem quer a API familiar |
+| **`pdf` / `pdfpy`** | Markdown → PDF tipografado; helpers de PDF em container |
+| **`verificar.sh`** | **a prova**: 16 itens, 0 falha, ~1 min, só leitura |
+
+---
+
+## O relato de campo (o Docker propriamente dito)
+
+O que segue é o registro de como o `docker` foi feito funcionar aqui — inclusive os
+cinco defeitos do Android que precisaram de conserto e os que **não têm** conserto.
+Medido num Galaxy S24 Ultra (Android 16, arm64, kernel 6.1.145), tudo digitado e
+executado dentro do Termux. O que já existia antes está creditado em
+[`AUTHORS.md`](AUTHORS.md) — e o que é contribuição original deste repositório,
+também.
 
 ---
 
@@ -348,9 +390,34 @@ qemu (GPL-2.0).
 
 # docker-termux — Docker on Android without root
 
-> Field report: getting `docker` to work on an Android phone without root, no
-> kernel daemon, no cgroups, no user namespaces — measured on a Galaxy S24 Ultra
-> (Android 16, arm64, kernel 6.1.145), all typed and executed inside Termux.
+> Field report: getting `docker` to work on an Android phone without root — no kernel
+> daemon, no cgroups, no user namespaces.
+
+## The idea
+
+An agent running on a phone should not be half an agent. This repository is the
+**field record** of how to give it what used to exist only on the desktop — with the
+cost of each choice on the table, because the scarce resource here is not CPU: it is
+**memory**.
+
+Nothing below came out of a tutorial; all of it came out of measuring on the device:
+
+| I need to… | use | measured cost |
+|---|---|---|
+| run a Linux tool that doesn't exist in Termux | `docker run <image>` (this repo) | 4 s `proot` floor |
+| read the **text** of a page | **plain HTTP** (`webget`, native) | **1.7 s, ~34 MB** |
+| get the page as an **image** (PNG/PDF) | `webprint` (Chromium **native**) | 2.8-5 s, **~1 GB** |
+| click, fill, run JS | `webcdp` (raw CDP, no Selenium) | **1.9-2.5 s** |
+| a full Linux to work in | `proot-distro login <distro>` | — |
+| `docker compose`, cgroups, isolated networking | **impossible without root** | VM (10-25× slower) |
+
+The rule that saves the most time: **start at level 1**. The native `webget` extracts
+**8,097 characters** from `react.dev` and **3,559** from `vercel.com` — "modern page"
+does not mean "needs a browser". Climb to Chromium when you need pixels or clicks: each
+climb costs ~1 GB of RAM against 34 MB.
+
+> Measured on a Galaxy S24 Ultra (Android 16, arm64, kernel 6.1.145), everything typed
+> and executed inside Termux, no root.
 
 ## What this is NOT
 
