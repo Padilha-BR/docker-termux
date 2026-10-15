@@ -60,11 +60,13 @@ ordinary apps. Without a namespace there is no:
 What exists here is **userspace execution** (`proot` + udocker): the binary runs, but the
 kernel isolates nothing. This is not a configuration limitation — it is the Android kernel.
 
-### 2.2 Playwright does not exist for Android
+### 2.2 Playwright: no Python wheel for Android — but it does work via Node
 
 `pip install playwright` → `No matching distribution found` (there is no wheel for
-Android/aarch64). Browser automation here is **chromedriver + Selenium** (`selenium` is
-pure Python and installs normally).
+Android/aarch64). For browser automation **in Python**, the route here is
+**chromedriver + Selenium** (`selenium` is pure Python and installs normally).
+
+**In Node it works** — measured, with two keys. See §3.6.3.
 
 ### 2.3 Chromium **inside the container** does not work
 
@@ -209,7 +211,7 @@ the rest is reading third-party documentation, and is marked as such.
 | `pkg install udocker` (official) | ✅ **measured** — solves 4 of this repo's 5 defects | see §3.5 |
 | **[Doki](https://github.com/OpceanAI/Doki)** v0.12.0 (Android ARM64 binary, 14 MB) | ⚠️ **measured, with serious gaps** | `run alpine echo` **0.79 s**, `pull alpine` 5.5 s, `doki-compose` exists; `-v x:/teste` mounts correctly, **but `:ro` is ignored** (§3.6.2) |
 | **Raw CDP** (native Chromium + `websockets`) | ✅ **measured** | static page in **1.9 s** against Selenium's 4.3 s, no `chromedriver` |
-| Playwright **via Node/npm** | 📄 documented by third parties, **not tested here** | `playwright-core` + `PLAYWRIGHT_BROWSERS_PATH=0` + `executablePath` — in **Python** there is no wheel for Android; in **Node** there is |
+| Playwright **via Node/npm** | ✅ **measured — it works** | browser up in **0.5 s**, react.dev rendered in **1.4 s** (6583 chars), 1280×720 screenshot, ~830 MB RAM; see §3.6.3 |
 | **[Podroid](https://github.com/ExTV/Podroid)** (APK, QEMU + its own kernel) | 📄 **not tested** | real Docker/Podman/LXC without root, Android 14+ |
 | **proot-distro v5** | 📄 **not tested** | ships udocker integrated, `--bind`, `--shared-home` |
 
@@ -243,6 +245,47 @@ This does not invalidate Doki — it is still faster and simpler than this repos
 solution, **and the `:ro` that bites us does not exist in it**. But today it does not
 replace this stack for the case we use most (networking + `apk`/`apt` inside the container).
 They are bugs to track; both have a minimal reproduction and deserve an upstream report.
+
+### 3.6.3 Playwright **does** run on Android — via Node, with two keys (measured)
+
+This document said "not tested" the day before. Now it is tested, and it works.
+
+The trap: Playwright refuses to start with `Unsupported platform: android`, thrown from its
+own `computeDefaultCacheDirectory()` — it only knows darwin/linux/win32. Two things are
+needed:
+
+1. **`PLAYWRIGHT_BROWSERS_PATH=0`** — with it, Playwright stops computing a cache directory
+   and stops dying at startup.
+2. **`executablePath`** pointing at Termux's own Chromium
+   (`$PREFIX/bin/chromium-browser`) — the Chromium Playwright would download is a glibc
+   build and does not run on Android/bionic.
+
+```js
+const { chromium } = require("playwright-core");
+const b = await chromium.launch({
+  executablePath: "/data/data/com.termux/files/usr/bin/chromium-browser",
+  args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+});
+```
+
+Install with `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm i playwright-core` — there is no point
+downloading a browser that cannot run.
+
+Measured, three runs in a row (all three agreed):
+
+| Step | Time | RAM |
+|---|---|---|
+| browser up (Node) | **0.5 s** | 416-421 MB |
+| `goto react.dev`, text rendered | **1.4 s** (6583 chars) | 829-835 MB |
+| `locator(...).innerText()` with auto-wait | **0.2-0.4 s** | — |
+| screenshot (1280×720 PNG, valid) | 0.1-0.5 s | — |
+| **total** | **3.0-3.2 s** | ~830 MB peak |
+
+Auto-wait, locators, `page.evaluate`, screenshots and `page.title` all behave normally.
+Honest caveat: the same ~830 MB of RAM as native Chromium, and therefore the same rule —
+one browser at a time. For plain text extraction this is overkill; `webget` does it in 1.7 s
+with 34 MB. Playwright earns its place when the script needs the *API* (auto-wait, locators,
+tracing), not the raw speed.
 
 ### Dead ends confirmed by others (don't waste your time)
 

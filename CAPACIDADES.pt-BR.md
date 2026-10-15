@@ -61,11 +61,13 @@ O que existe aqui é **execução em espaço de usuário** (`proot` + udocker): 
 roda, mas o kernel não isola nada. Isso não é uma limitação de configuração — é o
 kernel do Android.
 
-### 2.2 Playwright não existe para Android
+### 2.2 Playwright: sem wheel para Android em Python — mas funciona via Node
 
 `pip install playwright` → `No matching distribution found` (não há wheel para
-Android/aarch64). A automação de navegador aqui é **chromedriver + Selenium**
+Android/aarch64). A automação de navegador **em Python** aqui é **chromedriver + Selenium**
 (`selenium` é Python puro e instala normal).
+
+**Em Node ele funciona** — medido, com duas chaves. Veja a §3.6.3.
 
 ### 2.3 Chromium **dentro do container** não funciona
 
@@ -213,7 +215,7 @@ aparelho; o resto é leitura de documentação de terceiros, e está marcado com
 | `pkg install udocker` (oficial) | ✅ **medido** — resolve 4 dos 5 defeitos deste repo | ver §3.5 |
 | **[Doki](https://github.com/OpceanAI/Doki)** v0.12.0 (binário Android ARM64, 14 MB) | ⚠️ **medido, com lacunas graves** | `run alpine echo` **0,79 s**, `pull alpine` 5,5 s, `doki-compose` existe; `-v x:/teste` monta certo, **mas `:ro` é ignorado** (§3.6.2) |
 | **CDP puro** (Chromium nativo + `websockets`) | ✅ **medido** | página estática em **1,9 s** contra 4,3 s do Selenium, sem `chromedriver` |
-| Playwright **via Node/npm** | 📄 documentado por terceiros, **não testado aqui** | `playwright-core` + `PLAYWRIGHT_BROWSERS_PATH=0` + `executablePath` — em **Python** não existe wheel para Android; em **Node** existe |
+| Playwright **via Node/npm** | ✅ **medido — funciona** | navegador no ar em **0,5 s**, react.dev renderizado em **1,4 s** (6583 chars), screenshot 1280×720, ~830 MB de RAM; veja a §3.6.3 |
 | **[Podroid](https://github.com/ExTV/Podroid)** (APK, QEMU + kernel próprio) | 📄 **não testado** | Docker/Podman/LXC reais sem root, Android 14+ |
 | **proot-distro v5** | 📄 **não testado** | traz udocker integrado, `--bind`, `--shared-home` |
 
@@ -249,6 +251,47 @@ deste repositório, **e o `:ro` que nos morde não existe nele**. Mas hoje ele n
 substitui este stack para o caso que mais usamos (rede + `apk`/`apt` dentro do
 container). São bugs a acompanhar; os dois têm reprodução mínima e merecem ser
 reportados no upstream.
+
+### 3.6.3 O Playwright **roda** no Android — via Node, com duas chaves (medido)
+
+Este documento dizia "não testado" no dia anterior. Agora está testado, e funciona.
+
+A pegadinha: o Playwright se recusa a subir com `Unsupported platform: android`, lançado
+pelo próprio `computeDefaultCacheDirectory()` dele — ele só conhece darwin/linux/win32.
+Duas coisas são necessárias:
+
+1. **`PLAYWRIGHT_BROWSERS_PATH=0`** — com isso o Playwright para de calcular um diretório
+   de cache e para de morrer no arranque.
+2. **`executablePath`** apontando para o Chromium do próprio Termux
+   (`$PREFIX/bin/chromium-browser`) — o Chromium que o Playwright baixaria é um build
+   glibc e não roda em Android/bionic.
+
+```js
+const { chromium } = require("playwright-core");
+const b = await chromium.launch({
+  executablePath: "/data/data/com.termux/files/usr/bin/chromium-browser",
+  args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+});
+```
+
+Instale com `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm i playwright-core` — não faz sentido
+baixar um navegador que não roda.
+
+Medido, três rodadas seguidas (as três concordaram):
+
+| Etapa | Tempo | RAM |
+|---|---|---|
+| navegador no ar (Node) | **0,5 s** | 416-421 MB |
+| `goto react.dev`, texto renderizado | **1,4 s** (6583 chars) | 829-835 MB |
+| `locator(...).innerText()` com auto-wait | **0,2-0,4 s** | — |
+| screenshot (PNG 1280×720, válido) | 0,1-0,5 s | — |
+| **total** | **3,0-3,2 s** | ~830 MB de pico |
+
+Auto-wait, locators, `page.evaluate`, screenshot e `page.title` funcionam normal.
+Ressalva honesta: os mesmos ~830 MB de RAM do Chromium nativo, e portanto a mesma regra —
+um navegador por vez. Para extrair texto puro isso é exagero; o `webget` faz em 1,7 s com
+34 MB. O Playwright ganha o lugar dele quando o script precisa da *API* (auto-wait,
+locators, tracing), não da velocidade bruta.
 
 ### Becos sem saída confirmados por terceiros (não perca tempo)
 
