@@ -28,6 +28,7 @@ import asyncio
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -40,21 +41,27 @@ except ImportError:  # pragma: no cover
     raise SystemExit(2)
 
 CHROME = os.environ.get("CHROMIUM_BIN", "chromium-browser")
-PORTA = int(os.environ.get("CDP_PORTA", "9222"))
+# Porta FIXA so quando quem chamou pedir (CDP_PORTA); sem isso, 0. Com 9222
+# fixo uma segunda execucao (ou outro chromium ja vivo) ficava com a porta
+# ocupada e o /json/list devolvia o browser DE OUTREM — e o webcdp navegava e
+# executava JS la, sem perceber.
+PORTA = int(os.environ["CDP_PORTA"]) if os.environ.get("CDP_PORTA") else None
 PERFIL = os.path.join(os.environ.get("TMPDIR", "/data/data/com.termux/files/usr/tmp"),
                       "webcdp-perfil")
-ESPERA_CARGA = float(os.environ.get("WEBGDP_ESPERA", "45"))
+# WEBCDP_ESPERA e o nome certo; WEBGDP_ESPERA e o typo antigo, mantido por compat
+ESPERA_CARGA = float(os.environ.get("WEBCDP_ESPERA",
+                                     os.environ.get("WEBGDP_ESPERA", "45")))
 
 
-def esperar_alvo(timeout: float = 30) -> dict:
+def esperar_alvo(porta: int, timeout: float = 30) -> dict:
     fim = time.time() + timeout
     while time.time() < fim:
         try:
             with urllib.request.urlopen(
-                    f"http://127.0.0.1:{PORTA}/json/version", timeout=3) as r:
+                    f"http://127.0.0.1:{porta}/json/version", timeout=3) as r:
                 info = json.loads(r.read())
             with urllib.request.urlopen(
-                    f"http://127.0.0.1:{PORTA}/json/list", timeout=3) as r:
+                    f"http://127.0.0.1:{porta}/json/list", timeout=3) as r:
                 alvos = json.loads(r.read())
             paginas = [t for t in alvos if t.get("type") == "page"]
             if paginas:
@@ -64,6 +71,27 @@ def esperar_alvo(timeout: float = 30) -> dict:
             pass
         time.sleep(0.5)
     raise TimeoutError("o devtools do chromium nao respondeu (ou sem alvo de pagina)")
+
+
+def porta_do_nosso_browser(timeout: float = 30) -> int:
+    """Porta do Chromium que NOS lancamos, lida do proprio perfil.
+
+    Com --remote-debugging-port=0 o Chromium escolhe a porta e grava a
+    primeira linha em <user-data-dir>/DevToolsActivePort. E a unica forma de
+    nao acabar dirigindo um browser que ja estava na 9222.
+    """
+    arq = os.path.join(PERFIL, "DevToolsActivePort")
+    fim = time.time() + timeout
+    while time.time() < fim:
+        try:
+            with open(arq) as f:
+                porta = int(f.readline().strip())
+            if porta:
+                return porta
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.5)
+    raise TimeoutError(f"chromium nao gravou a porta em {arq}")
 
 
 async def coletar(ws_url: str, url: str, exprs: list[tuple[str, str]]) -> dict:
@@ -137,14 +165,26 @@ def main() -> int:
     if args.js:
         exprs.append(("js", args.js))
 
+    if shutil.which(CHROME) is None:
+        print(f"erro: chromium nao encontrado: {CHROME} "
+              "(pkg install x11-repo && pkg install chromium)", file=sys.stderr)
+        return 2
+
     os.makedirs(PERFIL, exist_ok=True)
+    # DevToolsActivePort de uma rodada anterior apontaria para OUTRO browser
+    try:
+        os.remove(os.path.join(PERFIL, "DevToolsActivePort"))
+    except OSError:
+        pass
+    porta = PORTA if PORTA is not None else 0
     proc = subprocess.Popen(
         [CHROME, "--headless=new", "--no-sandbox", "--disable-gpu",
-         "--disable-dev-shm-usage", f"--remote-debugging-port={PORTA}",
+         "--disable-dev-shm-usage", f"--remote-debugging-port={porta}",
          f"--user-data-dir={PERFIL}", "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        info = esperar_alvo()
+        info = esperar_alvo(PORTA if PORTA is not None
+                            else porta_do_nosso_browser())
         dados = asyncio.run(coletar(info["pagina_ws"], args.url, exprs))
 
         if args.screenshot:
