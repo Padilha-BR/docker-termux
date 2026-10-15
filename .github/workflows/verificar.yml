@@ -1,0 +1,82 @@
+name: verificar
+
+# Guarda automatizado do repositorio. Ele existe por um motivo concreto: um
+# `docker logs` dentro de aspas duplas, sem escape, fazia o SHELL executar o
+# comando a cada `docker run -d` — e nada no repo percebia, porque esse tipo de
+# erro so aparece em execucao. Estes passos pegam:
+#
+#   1. sintaxe shell quebrada                 (bash -n)
+#   2. shellcheck nivel warning ou pior       (bug de logica, palavra nao citada)
+#   3. backtick que o shell executa (SC2006)  (exatamente o bug acima)
+#   4. Python que nao compila                 (py_compile)
+#   5. regressao dos testes do motor direto   (testes/teste-docker-direct.py)
+#
+# NAO roda Android: o CI nao tem aparelho. A bateria completa (containers,
+# headless, PDF, orfaos) e o `bash verificar.sh`, rodado no celular.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  guarda:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Listar os scripts shell do repo
+        run: |
+          : > "$RUNNER_TEMP/scripts.txt"
+          git ls-files | while IFS= read -r f; do
+            case "$f" in *.py) continue ;; esac
+            head -1 "$f" 2>/dev/null | grep -qE '^#!.*(bash|/sh)' || continue
+            echo "$f" >> "$RUNNER_TEMP/scripts.txt"
+          done
+          echo "scripts shell: $(wc -l < "$RUNNER_TEMP/scripts.txt")"
+          cat "$RUNNER_TEMP/scripts.txt"
+
+      - name: Sintaxe dos scripts (bash -n)
+        run: |
+          falhou=0
+          while IFS= read -r f; do
+            if bash -n "$f" 2>/dev/null; then echo "ok   $f"; else
+              echo "ERRO de sintaxe em $f"; bash -n "$f"; falhou=1
+            fi
+          done < "$RUNNER_TEMP/scripts.txt"
+          exit $falhou
+
+      - name: shellcheck (warning ou pior reprova)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+          echo "shellcheck $(shellcheck --version | awk '/version:/{print $2}')"
+          shellcheck -S warning $(tr '\n' ' ' < "$RUNNER_TEMP/scripts.txt")
+
+      - name: backtick que o shell executa (SC2006) reprova
+        run: |
+          # `comando` dentro de aspas duplas vira expansao de comando. Foi assim
+          # que a dica de `-t` passou a rodar `docker logs` sozinha em cada
+          # `run -d`. Aqui isso quebra o build, com o arquivo e a linha.
+          falhou=0
+          while IFS= read -r f; do
+            saida=$(shellcheck -S style -f gcc "$f" 2>/dev/null | grep "SC2006" || true)
+            if [ -n "$saida" ]; then echo "$saida"; falhou=1; fi
+          done < "$RUNNER_TEMP/scripts.txt"
+          [ "$falhou" -eq 0 ] && echo "nenhum backtick perigoso"
+          exit $falhou
+
+      - name: Python compila
+        run: |
+          falhou=0
+          git ls-files | while IFS= read -r f; do
+            head -1 "$f" 2>/dev/null | grep -qE '^#!.*python' || continue
+            if python3 -m py_compile "$f" 2>/dev/null; then echo "ok   $f"; else
+              echo "ERRO ao compilar $f"; python3 -m py_compile "$f"; falhou=1
+            fi
+          done
+          exit $falhou
+
+      - name: Testes unitarios do motor direto
+        run: python3 testes/teste-docker-direct.py

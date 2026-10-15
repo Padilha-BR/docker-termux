@@ -71,7 +71,9 @@ from_do_dockerfile() {   # le o contexto e imprime as imagens base do FROM
         if [ "$pular" = 1 ]; then arq="$a"; pular=0; continue; fi
         case "$a" in
             -f|--file) pular=1 ;;
-            --*=*|-t|-q|--no-cache|--pull|-*|--*) continue ;;
+            # -*) cobre --x=y, --flag e -f: listar os especificos antes seria
+            # redundante (o shellcheck acusa SC2221/SC2222 e nao muda nada).
+            -*) continue ;;
             *) ultimo="$a" ;;
         esac
     done

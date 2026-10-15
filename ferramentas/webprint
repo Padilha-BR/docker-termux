@@ -52,7 +52,7 @@ trap limpar EXIT
 
 FLAGS=(--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage
        --no-first-run --no-default-browser-check --hide-scrollbars
-       --disable-features=Translate,BackForwardCache
+       "--disable-features=Translate,BackForwardCache"
        --user-data-dir="$PERFIL" --virtual-time-budget="$ESPERA")
 
 gerar() {   # roda o chromium; $1 = destino (ou "" para stdout)
