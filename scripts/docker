@@ -54,21 +54,24 @@ DAEMON_UP="$MEUBIN/docker-daemon-up"
 # ~/.udocker). Sem isto, `docker run` de imagem nova e `docker build` cujo FROM
 # nao esta local falham com mensagem enganosa.
 # Flags do `docker run`/`create` que CONSOMEM o proximo token. Fora desta lista,
-# uma flag e booleana. Mesma tabela do docker-direct (FLAGS_COM_VALOR la).
+# uma flag e booleana. Mesma tabela do docker-direct (FLAGS_COM_VALOR la; o
+# teste testes/teste-docker-direct.py reprova se as duas divergirem). Faltando
+# uma aqui, o valor dela vira a "imagem" e dispara um pull espurio.
 flags_com_valor=" -a --attach --add-host --annotation --blkio-weight
 --blkio-weight-device --cap-add --cap-drop --cgroup-parent --cgroupns --cidfile
---cpu-period --cpu-quota --cpu-rt-period --cpu-rt-runtime -c --cpu-shares --cpus
+--cpu-count --cpu-percent --cpu-period --cpu-quota --cpu-rt-period --cpu-rt-runtime -c --cpu-shares --cpus
 --cpuset-cpus --cpuset-mems --detach-keys --device --device-cgroup-rule
 --device-read-bps --device-read-iops --device-write-bps --device-write-iops
 --dns --dns-option --dns-search --domainname --entrypoint -e --env --env-file
 --expose --gpus --group-add --health-cmd --health-interval --health-retries
 --health-start-interval --health-start-period --health-timeout -h --hostname
---ip --ip6 --ipc --isolation --kernel-memory -l --label --label-file --link
+--io-maxbandwidth --io-maxiops --ip --ip6 --ipc --isolation --kernel-memory
+-l --label --label-file --link
 --link-local-ip --log-driver --log-opt --mac-address -m --memory
 --memory-reservation --memory-swap --memory-swappiness --mount --name --network
 --net --network-alias --oom-score-adj --pid --pids-limit --platform -p --publish
 --pull --restart --runtime --security-opt --shm-size --stop-signal
---stop-timeout --storage-opt --sysctl --tmpfs -u --user --userns --uts -v
+--stop-timeout --storage-opt --sysctl --tmpfs --ulimit -u --user --userns --uts -v
 --volume --volume-driver --volumes-from -w --workdir "
 flags_com_valor="$(printf '%s' "$flags_com_valor" | tr '\n' ' ') "
 curtas_com_valor="acehlmpuvw"     # -a -c -e -h -l -m -p -u -v -w
@@ -180,10 +183,15 @@ from_do_dockerfile() {   # le o contexto e imprime as imagens base do FROM
                 fi ;;
             FROM)
                 img="$x"
-                for k in "${!valores[@]}"; do
+                # do nome mais LONGO para o mais curto: com ARG VERSAO e
+                # VERSAO_BASE, trocar $VERSAO primeiro estragava $VERSAO_BASE
+                while read -r k; do
+                    [ -z "$k" ] && continue
                     img="${img//\$\{$k\}/${valores[$k]}}"
                     img="${img//\$$k/${valores[$k]}}"
-                done
+                done < <(for k in "${!valores[@]}"; do
+                             printf '%d %s\n' "${#k}" "$k"
+                         done | sort -rn | cut -d' ' -f2-)
                 if [ -n "${estagios[$img]+x}" ]; then
                     :
                 elif [[ "$img" == *'$'* ]]; then
@@ -194,6 +202,7 @@ from_do_dockerfile() {   # le o contexto e imprime as imagens base do FROM
                 [ -n "$y" ] && estagios[$y]=1 ;;
         esac
     done < <(awk '
+        { sub(/\r$/, "") }                   # Dockerfile com CRLF
         /^[[:space:]]*#/ { next }
         { c = toupper($1) }
         c == "ARG" && !from { print "ARG", $2; next }
@@ -237,26 +246,8 @@ case "${1:-}" in
 esac
 
 if ! bash "$DAEMON_UP" >/dev/null 2>&1; then
-    echo "aviso: daemon indisponivel — usando modo direto (sem build/exec/logs)" >&2
+    echo "aviso: daemon indisponivel — usando modo direto (sem build; exec/logs so de container -d do modo direto)" >&2
     exec "$DIRETO" "$@"
-fi
-
-# O daemon so captura o stdout do container quando ele tem TTY. Verificado com
-# a CLI direta variando SO o -t (supervisor ja compilado):
-#   docker run -d   -> `docker logs` vazio (a saida vai para o log do daemon)
-#   docker run -dt  -> `docker logs` devolve a saida
-# O Docker real nao precisa disso, entao em `run -d` sem -t inserimos -t e
-# avisamos, para `docker logs` funcionar como o usuario espera.
-if [ "${1:-}" = "run" ]; then
-    # so as flags ANTES da imagem contam: `--workdir`, `--read-only`, `--dns` ou
-    # o `date -d @0` do comando do container nao sao -d. Ver analisar_run.
-    analisar_run "${@:2}"
-    if [ "$TEM_D" = 1 ] && [ "$TEM_T" = 0 ]; then
-        novos=("run" "-t")
-        for a in "${@:2}"; do novos+=("$a"); done
-        set -- "${novos[@]}"
-        echo "dica: -t adicionado para o daemon capturar a saida (sem ele \`docker logs\` volta vazio; limitacao do daemon userspace)" >&2
-    fi
 fi
 
 # O supervisor (binario C em ~/.udockerd) evita processos orfaos quando o daemon
@@ -291,6 +282,21 @@ case "${1:-}" in
         if [ -n "$precisa_direto" ]; then
             echo "aviso: $precisa_direto exige o motor direto; usando modo direto" >&2
             exec "$DIRETO" "$@"
+        fi
+        # Daqui em diante vai para o DAEMON. Ele so captura o stdout do container
+        # quando ha TTY. Verificado com a CLI direta variando SO o -t:
+        #   docker run -d   -> `docker logs` vazio (a saida vai para o log do daemon)
+        #   docker run -dt  -> `docker logs` devolve a saida
+        # O Docker real nao precisa disso, entao em `run -d` sem -t inserimos -t
+        # e avisamos. So aqui, depois do roteamento: antes o -t era inserido
+        # tambem no `run -d -v ...`, que vai para o motor direto e repassava -t
+        # ao udocker sem terminal. So as flags ANTES da imagem contam (o
+        # `date -d @0` do comando do container nao e -d) — ver analisar_run.
+        if [ "$1" = run ] && [ "$TEM_D" = 1 ] && [ "$TEM_T" = 0 ]; then
+            novos=("run" "-t")
+            for a in "${@:2}"; do novos+=("$a"); done
+            set -- "${novos[@]}"
+            echo "dica: -t adicionado para o daemon capturar a saida (sem ele \`docker logs\` volta vazio; limitacao do daemon userspace)" >&2
         fi
         img="$IMG"
         garantir_imagem "$img" || true
