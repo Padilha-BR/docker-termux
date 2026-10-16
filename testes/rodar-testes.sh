@@ -2,10 +2,35 @@
 # Bateria de testes adversariais do comando `pdf` (Markdown -> PDF via Docker).
 # Cada caso valida: codigo de saida, mensagem e/ou o PDF produzido de verdade.
 # Uso: bash rodar-testes.sh
+#
+# A fixture (aula.md) e gerada aqui, num diretorio temporario: antes o script
+# dependia de ~/testes-pdf/aula.md, que nada no repo criava.
 set -uo pipefail
-export PATH="$HOME/.hermes/bin:$PATH"
-BASE="$HOME/testes-pdf"
+export PATH="${DOCKER_TERMUX_BIN:-$HOME/.hermes/bin}:$PATH"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+BASE="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/testes-pdf-XXXXXX")" || exit 1
+trap 'rm -rf "$BASE"' EXIT
 cd "$BASE" || exit 1
+
+# cabe em 1 pagina A4 com a capa; tem os trechos que a secao 3 procura
+cat > aula.md <<'MD'
+# Unit 3 — present perfect
+
+O **present perfect** liga o passado ao presente. Atenção à duração:
+*for* (período) e *since* (ponto de partida).
+
+## Exemplos
+
+- I have lived here for ten years.
+- She has worked here since 2020.
+
+| forma | exemplo |
+|---|---|
+| afirmativa | I have seen it |
+| negativa | I haven't seen it |
+
+> Dica de áudio 🎧: ouça os exemplos e repita.
+MD
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  \033[32mPASS\033[0m %s\n' "$1"; }
@@ -125,5 +150,4 @@ docker daemon up >/dev/null 2>&1
 titulo "RESULTADO"
 printf '  passaram: %s\n  falharam: %s\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] && printf '  \033[32mTUDO OK\033[0m\n' || printf '  \033[31mTEM FALHA\033[0m\n'
-rm -rf uma-pasta sub vazio.md grande.md extensao.txt 2>/dev/null
 exit $((FAIL > 0))
