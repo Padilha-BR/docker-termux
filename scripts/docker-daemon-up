@@ -16,18 +16,79 @@
 # dirigindo o udocker; a execucao real e proot 5.1 (via shim em ~/.udocker/bin).
 
 set -u
-BASE="$HOME/docker-termux"
+BASE="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}"
+MEUBIN="${DOCKER_TERMUX_BIN:-$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")}"
 VENV="$BASE/venv-udockerd"
 UDOCKERD="$VENV/bin/udockerd"
-UDOCKERD_UNIX="$HOME/.hermes/bin/udockerd-unix"
+UDOCKERD_UNIX="$MEUBIN/udockerd-unix"
 STATE="$BASE/state"
 LOG="$BASE/logs/udockerd.log"
 PIDFILE="$STATE/udockerd.pid"
 SOCKET="${UDOCKERD_SOCKET:-$HOME/.udockerd/docker.sock}"
 PORTA="${DOCKER_DAEMON_PORT:-2375}"
 TCP="${DOCKER_DAEMON_TCP:-0}"
+LOCK="$STATE/udockerd.lock"
+# nameservers dos containers do daemon (mesma variavel do docker-direct)
+DNS_ARGS=()
+for n in $(printf '%s' "${DOCKER_TERMUX_DNS:-8.8.8.8,8.8.4.4}" | tr ',' ' '); do
+    case "$n" in
+        *[!0-9a-fA-F.:]*|'') echo "aviso: DOCKER_TERMUX_DNS: '$n' ignorado" >&2 ;;
+        *) DNS_ARGS+=(--dns "$n") ;;
+    esac
+done
+[ ${#DNS_ARGS[@]} -gt 0 ] || DNS_ARGS=(--dns 8.8.8.8 --dns 8.8.4.4)
 
 mkdir -p "$STATE" "$BASE/logs"
+
+# PID + starttime: o pidfile guarda "pid starttime" (campo 22 do
+# /proc/<pid>/stat). Depois de um reboot o numero e reciclado; sem conferir a
+# assinatura, o down mandava SIGTERM para o GRUPO de um processo inocente
+# (o docker-direct ja fazia essa conferencia; o daemon nao).
+starttime_de() {
+    local linha
+    linha=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    linha="${linha##*) }"           # o nome do processo pode ter espaco e ')'
+    # shellcheck disable=SC2086
+    set -- $linha
+    [ $# -ge 20 ] && printf '%s' "${20}"
+}
+
+# imprime o pid do pidfile SE ele ainda for o mesmo processo e for o udockerd
+pid_do_daemon() {
+    local pid st atual
+    [ -f "$PIDFILE" ] || return 1
+    read -r pid st < "$PIDFILE" 2>/dev/null || return 1
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    atual=$(starttime_de "$pid") || return 1
+    if [ -n "$st" ] && [ "$st" != "$atual" ]; then
+        return 1                    # numero reciclado: nao e mais o nosso
+    fi
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q udockerd || return 1
+    printf '%s' "$pid"
+}
+
+# LOCK: duas chamadas `docker ...` ao mesmo tempo subiam DOIS udockerd e o
+# pidfile ficava com o que morreu no bind. mkdir e atomico; quem nao pega o
+# lock espera o outro terminar (e normalmente sai no `responde`).
+pegar_lock() {
+    local dono
+    for _ in $(seq 1 60); do
+        if mkdir "$LOCK" 2>/dev/null; then
+            echo $$ > "$LOCK/pid"
+            trap 'rm -rf "$LOCK"' EXIT
+            return 0
+        fi
+        dono=$(cat "$LOCK/pid" 2>/dev/null || echo "")
+        if [ -n "$dono" ] && ! kill -0 "$dono" 2>/dev/null; then
+            rm -rf "$LOCK"          # dono morreu sem soltar: lock velho
+            continue
+        fi
+        sleep 0.5
+    done
+    echo "erro: outro docker-daemon-up segura $LOCK ha 30 s" >&2
+    return 1
+}
 
 responde() {
     if [ "$TCP" = 1 ]; then
@@ -38,6 +99,9 @@ responde() {
 }
 
 responde && exit 0
+
+pegar_lock || exit 1
+responde && exit 0              # o dono anterior do lock ja subiu o daemon
 
 if [ "$TCP" = 1 ]; then
     [ -x "$UDOCKERD" ] || {
@@ -55,15 +119,13 @@ else
     }
 fi
 
-# pid antigo ainda subindo? espera em vez de duplicar
-if [ -f "$PIDFILE" ]; then
-    antigo=$(cat "$PIDFILE" 2>/dev/null || echo "")
-    if [ -n "$antigo" ] && kill -0 "$antigo" 2>/dev/null; then
-        for _ in $(seq 1 20); do
-            responde && exit 0
-            sleep 0.5
-        done
-    fi
+# pid antigo (o MESMO processo, conferido) ainda subindo? espera em vez de duplicar
+if antigo=$(pid_do_daemon); then
+    for _ in $(seq 1 20); do
+        responde && exit 0
+        sleep 0.5
+    done
+    echo "aviso: udockerd $antigo vivo mas sem responder — subindo outro" >&2
 fi
 
 # Daemon LEGADO de versao anterior, ainda escutando em TCP? Ele e exatamente o
@@ -99,14 +161,17 @@ termux-wake-lock 2>/dev/null || true
 
 if [ "$TCP" = 1 ]; then
     setsid "$UDOCKERD" --host 127.0.0.1 --port "$PORTA" \
-        --data-dir "$HOME/.udocker" --dns 8.8.8.8 --dns 8.8.4.4 \
+        --data-dir "$HOME/.udocker" "${DNS_ARGS[@]}" \
         >>"$LOG" 2>&1 < /dev/null &
 else
     setsid "$VENV/bin/python" "$UDOCKERD_UNIX" --socket "$SOCKET" \
-        --data-dir "$HOME/.udocker" --dns 8.8.8.8 --dns 8.8.4.4 \
+        --data-dir "$HOME/.udocker" "${DNS_ARGS[@]}" \
         >>"$LOG" 2>&1 < /dev/null &
 fi
-echo $! > "$PIDFILE"
+novo=$!
+# grava atomico: "pid starttime"
+printf '%s %s\n' "$novo" "$(starttime_de "$novo" || true)" > "$PIDFILE.tmp" \
+    && mv -f "$PIDFILE.tmp" "$PIDFILE"
 
 for _ in $(seq 1 30); do
     responde && exit 0
