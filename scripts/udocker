@@ -15,8 +15,16 @@
 # UDOCKER_REAL permite apontar para outro binario (ex.: o do tarball do repo).
 set -uo pipefail
 
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+EU="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+DISPATCHER="$(dirname "$EU")/docker"
 REAL="${UDOCKER_REAL:-$PREFIX/bin/udocker}"
-DISPATCHER="$HOME/.hermes/bin/docker"
+# sem o pacote do Termux, cai no udocker do tarball que o setup instalou
+if [ -z "${UDOCKER_REAL:-}" ] && [ ! -x "$REAL" ]; then
+    BASE="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}"
+    VER="${UDOCKER_VERSAO:-$(cat "$BASE/udocker-versao" 2>/dev/null || echo 1.3.17)}"
+    REAL="$BASE/udocker-$VER/udocker/udocker"
+fi
 
 case "${1:-}" in
     build|exec|logs)
@@ -29,6 +37,12 @@ case "${1:-}" in
         ;;
 esac
 
+# Guarda contra loop: se esta ponte for instalada em $PREFIX/bin (ou
+# UDOCKER_REAL apontar para ela), `exec "$REAL"` chamaria a si mesma para sempre.
+if [ "$(readlink -f "$REAL" 2>/dev/null)" = "$EU" ]; then
+    printf 'erro: %s aponta para esta propria ponte (%s) — defina UDOCKER_REAL com o udocker de verdade\n' "$REAL" "$EU" >&2
+    exit 2
+fi
 if [ ! -x "$REAL" ]; then
     printf 'erro: udocker nao encontrado em %s (instale com: pkg install udocker)\n' "$REAL" >&2
     exit 2
