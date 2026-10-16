@@ -180,6 +180,31 @@ logins concorrentes (planos com número fixo de acessos), **prefira HTTP puro**
 (`requests`) em vez de navegador — a automação não muda a cota, agrava. Vale para
 qualquer sistema com cota compartilhada, com ou sem container.
 
+## Pitfall: `OCI runtime create failed: [Errno 2]` = daemon VELHO em execução (medido 16/10/2026)
+
+Sintoma: `docker doctor` passa tudo `[OK]` (CLI, daemon, proot, qemu, DNS), o modo direto funciona
+(`docker-direct run --rm alpine echo ok`), e **só o `docker run`** morre com
+`OCI runtime create failed: [Errno 2] No such file or directory`. O log
+`~/docker-termux/logs/udockerd.log` mostra `Error: while extracting image layer (proot retry)` e
+`Error: creating container`, e o `verificar.sh` reprova exatamente 3 itens (run + fork/exec,
+`apk add`, rede + DNS).
+
+Causa medida: **o daemon estava no ar desde ANTES das atualizações**. Ele responde na API, então o
+`docker-daemon-up` (idempotente) sai cedo e o processo vivo continua com o código/estado velho.
+Conserto: `docker-daemon-down && docker-daemon-up` (ou `docker daemon up`). No mesmo dia:
+3 FALHA → **16 OK, 0 FALHA**.
+
+O que **não** era a causa (isolei para não repetir o diagnóstico errado): o shebang
+`#!/usr/bin/env python` do `maincmd.py` — com shebang ruim **e** daemon reiniciado o `run` funciona,
+porque o daemon importa a lib do udocker e não executa o binário (é a regra da seção acima); e o
+`LD_PRELOAD` do `termux-exec` no daemon, que está lá e funciona. Regra geral: antes de acusar o
+código, faça o daemon nascer do zero e repita o teste — em `docker`, "processo velho" é a primeira
+suspeita, igual ao caso dos injetores 8890/8891.
+
+Detalhe que confunde: o `docker-daemon-down` remove o socket, mas a chamada seguinte do `docker` já
+encontra o daemon no ar outra vez (medido: <1 s) — não conte com "derrubei, então está caído" para
+provar nada.
+
 ## Armadilhas que custam tempo
 
 - **O udocker NÃO aceita sufixo `:ro`/`:rw`.** Passado cru,
