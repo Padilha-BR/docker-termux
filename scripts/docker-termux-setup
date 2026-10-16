@@ -12,12 +12,18 @@
 #
 #   FERRAMENTAS             pdf, pdfpy, webget, webprint, webcdp, webplay (e o
 #     helper webauto.py), as fontes das imagens e um venv proprio
-#     (venv-web: selenium, websockets, httpx, bs4) — nao depende do Hermes.
+#     (venv-web: selenium, websockets, httpx, bs4, html2text, versoes
+#     pinadas em PACOTES_WEB) — nao depende do Hermes.
 #
-# Onde instala (variaveis de ambiente, com os padroes do Hermes):
-#   DOCKER_TERMUX_HOME  runtime, imagens, venvs, logs   (~/docker-termux)
-#   DOCKER_TERMUX_BIN   comandos (docker, pdf, web*...)  (~/.hermes/bin)
-#   DOCKER_TERMUX_DNS   nameservers dos containers        (8.8.8.8,8.8.4.4)
+# Variaveis de ambiente (padroes entre parenteses; os de pasta sao os do Hermes):
+#   DOCKER_TERMUX_HOME  runtime, imagens, venvs, logs, state   (~/docker-termux)
+#   DOCKER_TERMUX_BIN   comandos docker, udocker, pdf, web*... (~/.hermes/bin)
+#   UDOCKER_VERSAO      runtime udocker; gravada em $BASE/udocker-versao, que o
+#                       docker-direct e a ponte udocker leem   (1.3.17)
+#   DOCKER_CLI_VERSAO   CLI oficial estatica (hash em checksums.txt)
+#   UDOCKERD_VERSAO     udockerd do pip                        (0.3.5)
+#   DOCKER_TERMUX_DNS   nao e lida aqui: o passo de DNS chama `docker-direct
+#                       dns-fix`, que a le                      (8.8.8.8,8.8.4.4)
 #
 # Idempotente: pode rodar quantas vezes quiser; cada passo verifica antes de
 # agir. --force refaz os downloads e a compilacao.
