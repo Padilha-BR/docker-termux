@@ -5,18 +5,47 @@
 # processos do daemon (killpg) leva todos junto, evitando orfaos.
 
 set -u
-BASE="$HOME/docker-termux"
+BASE="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}"
 PIDFILE="$BASE/state/udockerd.pid"
 PORTA="${DOCKER_DAEMON_PORT:-2375}"
+
+# PID + starttime: o pidfile guarda "pid starttime" (campo 22 do
+# /proc/<pid>/stat). Depois de um reboot o numero e reciclado; sem conferir a
+# assinatura, o down mandava SIGTERM para o GRUPO de um processo inocente
+# (o docker-direct ja fazia essa conferencia; o daemon nao).
+starttime_de() {
+    local linha
+    linha=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    linha="${linha##*) }"           # o nome do processo pode ter espaco e ')'
+    # shellcheck disable=SC2086
+    set -- $linha
+    [ $# -ge 20 ] && printf '%s' "${20}"
+}
+
+# imprime o pid do pidfile SE ele ainda for o mesmo processo e for o udockerd
+pid_do_daemon() {
+    local pid st atual
+    [ -f "$PIDFILE" ] || return 1
+    read -r pid st < "$PIDFILE" 2>/dev/null || return 1
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    atual=$(starttime_de "$pid") || return 1
+    if [ -n "$st" ] && [ "$st" != "$atual" ]; then
+        return 1                    # numero reciclado: nao e mais o nosso
+    fi
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q udockerd || return 1
+    printf '%s' "$pid"
+}
 
 if [ ! -f "$PIDFILE" ]; then
     echo "sem pidfile — daemon provavelmente ja parado"
     exit 0
 fi
 
-pid=$(cat "$PIDFILE" 2>/dev/null || echo "")
-if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-    echo "daemon ja estava parado"
+if ! pid=$(pid_do_daemon); then
+    # morto, ou o numero foi reciclado (reboot) por outro processo: NADA e
+    # sinalizado — killpg num pid reciclado derrubaria um grupo inocente
+    echo "daemon ja estava parado (pidfile velho descartado, nada sinalizado)"
     rm -f "$PIDFILE"
     exit 0
 fi
