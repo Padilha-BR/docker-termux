@@ -10,15 +10,24 @@ o comando roda). Nao e estimativa.
 """
 from __future__ import annotations
 
+import atexit
 import os
+import pathlib
+import shutil
 import subprocess
+import tempfile
 import time
 
 CASA = os.path.expanduser("~")
 ALVOS = [("estatica", "https://example.com"),
          ("SPA (JS)", "https://react.dev")]
-PY_WEB = f"{CASA}/docker-termux/venv-web/bin/python"
-PY_HERMES = f"{CASA}/hermes-agent/venv/bin/python"
+BASE_DT = os.environ.get("DOCKER_TERMUX_HOME") or f"{CASA}/docker-termux"
+BIN_DT = os.environ.get("DOCKER_TERMUX_BIN") or f"{CASA}/.hermes/bin"
+PY_WEB = f"{BASE_DT}/venv-web/bin/python"
+# o teste de selenium e o do proprio repo (antes: ~/testes-pdf, que nada cria)
+EXEMPLO = pathlib.Path(__file__).resolve().parent.parent / "examples" / "automacao-web"
+TRAB = tempfile.mkdtemp(prefix="benchmark-")
+atexit.register(shutil.rmtree, TRAB, True)
 
 
 def rss_chromium() -> int:
@@ -46,7 +55,7 @@ def medir(rotulo: str, cmd: list[str]) -> None:
     ini = time.time()
     pico = 0
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, cwd=CASA)
+                            stderr=subprocess.DEVNULL, cwd=TRAB)
     while proc.poll() is None:
         pico = max(pico, rss_chromium())
         time.sleep(0.3)
@@ -58,14 +67,14 @@ def medir(rotulo: str, cmd: list[str]) -> None:
     print(f"      saida ({len(saida)} bytes): {amostra}")
 
 
-SCRIPT_SEL = f"{CASA}/testes-pdf/teste-selenium.py"
+SCRIPT_SEL = str(EXEMPLO / "teste-selenium.py")
 
 for nome, url in ALVOS:
     print(f"\n### {nome}: {url}")
-    medir("nivel 1: webget (container/proot)",
-          [f"{CASA}/.hermes/bin/webget", url, "--texto"])
+    medir("nivel 1: webget",
+          [f"{BIN_DT}/webget", url, "--texto"])
     medir("nivel 2: webprint (chromium nativo)",
-          [f"{CASA}/.hermes/bin/webprint", url, "--texto"])
+          [f"{BIN_DT}/webprint", url, "--texto"])
     if nome == "estatica":
         medir("nivel 3: selenium+chromedriver (nativo)",
-              [PY_WEB, SCRIPT_SEL])
+              [PY_WEB, SCRIPT_SEL, str(EXEMPLO / "interacao.html")])

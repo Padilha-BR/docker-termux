@@ -5,12 +5,20 @@
 # container em execucao), em paralelo com o comando — nao e estimativa.
 #
 # Uso: bash benchmark-headless.sh [url-estatica] [url-js]
+#
+# Nivel 3 = webcdp (CDP puro) e webplay (Selenium + webauto). O antigo nivel 3
+# era um script Playwright, que nao roda no Termux (nao ha wheel para Android).
+# Tudo acontece num diretorio temporario: nada de /tmp (nao existe no Android)
+# nem `rm -f benc*` no $HOME.
 
 set -uo pipefail
-export PATH="$HOME/.hermes/bin:$PATH"
+export PATH="${DOCKER_TERMUX_BIN:-$HOME/.hermes/bin}:$PATH"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 BASE="${1:-https://example.com}"
 JS="${2:-https://react.dev}"
-cd "$HOME" || exit 1
+TRAB="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/benchmark-XXXXXX")" || exit 1
+trap 'rm -rf "$TRAB"' EXIT
+cd "$TRAB" || exit 1
 
 pico_ram() {   # $1 = pid a monitorar, $2 = arquivo de saida
     local pid="$1" arq="$2" pico=0
@@ -54,21 +62,17 @@ medir() {      # medir "rotulo" comando...
 }
 
 echo "ALVO 1 (pagina estatica): $BASE"
-rm -f benc1.* benc2.* benc3.*
 medir "nivel 1: webget --texto"      webget "$BASE" --texto -o benc1.txt
 medir "nivel 2: webprint --dom"      webprint "$BASE" --dom -o benc2.html
-cat > /tmp/benc3.py <<'PY'
+medir "nivel 3: webcdp --titulo"     webcdp "$BASE" --titulo
+cat > benc3.py <<'PY'
 import sys
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    b = p.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
-    pg = b.new_page()
-    pg.goto(sys.argv[1], timeout=45000)
-    print("titulo:", pg.title())
-    b.close()
+from webauto import sessao
+with sessao() as d:
+    d.get(sys.argv[1])
+    print("titulo:", d.title)
 PY
-cp /tmp/benc3.py "$HOME/benc3.py" 2>/dev/null
-medir "nivel 3: webplay (Playwright)" webplay benc3.py "$BASE"
+medir "nivel 3b: webplay (Selenium)" webplay benc3.py "$BASE"
 
 echo
 echo "ALVO 2 (pagina que renderiza via JS): $JS"
@@ -77,8 +81,7 @@ medir "nivel 2: webprint --dom"      webprint "$JS" --dom -o benc5.html
 
 echo
 echo "tamanhos de imagem em disco:"
-for img in web:1 pdf-tool:1 navegador:1; do
+for img in web:1 pdf-tool:1; do
     t=$(docker image inspect "$img" --format '{{.Size}}' 2>/dev/null)
     [ -n "$t" ] && printf '  %-12s %s MB\n' "$img" "$((t / 1000000))"
 done
-rm -f benc1.txt benc2.html benc4.txt benc5.html benc3.py 2>/dev/null
