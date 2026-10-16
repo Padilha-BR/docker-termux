@@ -39,7 +39,7 @@ ou de clique: cada subida custa ~1 GB de RAM contra 34 MB do nível 1.
 | **`webcdp`** | nível 3 — CDP puro (**sem Selenium**): texto, JS, screenshot |
 | **`webplay`** | nível 3b — Selenium + chromedriver, para quem quer a API familiar |
 | **`pdf` / `pdfpy`** | Markdown → PDF tipografado; helpers de PDF em container |
-| **`verificar.sh`** | **a prova**: 17 itens, ~2 min; muda estado (daemon, imagens, containers) |
+| **`verificar.sh`** | **a prova**: 17 itens, ~2 min; muda estado (daemon, imagens, containers) — rodapé saudável: `0 FALHA` |
 
 ---
 
@@ -158,6 +158,13 @@ cd docker-termux
 bash docker-termux-setup          # idempotente; --force refaz downloads
 docker doctor                     # confere cada peça
 ```
+
+**Atualizar um aparelho que já existe = rodar este instalador e depois reiniciar o daemon.**
+O instalador copia os comandos para `$DOCKER_TERMUX_BIN` (ele agora se copia também), mas **não**
+reinicia o daemon: o `docker-daemon-up` é idempotente e sai no instante em que a API responde, então
+o processo vivo continua rodando o código velho. Pular esse restart é exatamente a cara de "instalei
+e continua quebrado" — medido aqui em 16/10/2026, com o `docker run` morrendo em
+`OCI runtime create failed: [Errno 2]` até o daemon renascer (3 FALHA → **0 FALHA**).
 
 O instalador cuida de: `proot`, `qemu-user-x86-64`, runtime udocker, shim do
 proot, patch do qemu, venv do udockerd, compilação do supervisor, download da CLI
@@ -286,6 +293,21 @@ proot error: execve("/bin/busybox"): No such file or directory
 carregar essa biblioteca e falha. Foi isolado por bisseção — é a única variável
 do ambiente que mata o processo. **Correção:** remover `LD_PRELOAD` (e
 `LD_LIBRARY_PATH`) antes de chamar o motor.
+
+### 6. O Android 17 parou de reescrever o shebang do udocker
+
+```
+bad interpreter: No such file or directory        # ou FileNotFoundError no Python
+```
+
+O tarball oficial do udocker traz `#!/usr/bin/env python`, e no Android **não existe
+`/usr/bin/env`**. Até o Android 16 o `termux-exec` reescrevia esse shebang; **no Android 17 isso
+parou**, e o modo direto (`run -v`, `pull`, `rm`) morre com a mensagem acima. O sintoma engana: o
+daemon continua funcionando (ele importa a lib do udocker em vez de executar o binário) e o
+`docker doctor` passa, porque só confere que o arquivo existe. **Conserto em dois níveis:** o motor
+direto chama o udocker via `sys.executable`, e o instalador aponta o shebang para `$PREFIX/bin/env`
+— idempotente e sempre, inclusive num aparelho que já tinha o udocker extraído (era essa a
+armadilha: o conserto morava dentro do ramo de download e não rodava em aparelho atualizado).
 
 ### Bônus: ruído do linker
 

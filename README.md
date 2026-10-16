@@ -165,6 +165,13 @@ the qemu patch, the udockerd venv, supervisor compilation, the official CLI down
 scripts, shortcuts, the `venv-web` (Selenium/`websockets`/httpx for the web commands) and
 `resolv.conf`.
 
+**Updating an existing phone = run this installer and then restart the daemon.** The installer
+copies the commands into `$DOCKER_TERMUX_BIN` (it copies itself as well) but it does **not**
+restart the daemon: `docker-daemon-up` is idempotent and exits the moment the API answers, so the
+live process keeps running the old code. Skipping that restart is exactly what "I installed it and
+it is still broken" looks like — measured here on 2026-10-16, with `docker run` dying in
+`OCI runtime create failed: [Errno 2]` until the daemon was restarted (3 FALHA → **0 FALHA**).
+
 **Where things go.** The repo was born inside the Hermes agent and the defaults show it —
 but nothing requires Hermes to be installed:
 
@@ -285,6 +292,21 @@ into every command; the container's loader tries to load that library and fails.
 bisection — it is the only environment variable that kills the process. **Fix:** strip
 `LD_PRELOAD` (and `LD_LIBRARY_PATH`) before calling the engine.
 
+### 6. Android 17 stopped rewriting the udocker shebang
+
+```
+bad interpreter: No such file or directory        # or FileNotFoundError under Python
+```
+
+The official udocker tarball ships `#!/usr/bin/env python`, and Android has no `/usr/bin/env`.
+Until Android 16 `termux-exec` rewrote that shebang; **on Android 17 it stopped**, and the direct
+mode (`run -v`, `pull`, `rm`) dies with the message above. It hides well: the daemon keeps working
+(it imports the udocker library instead of executing the binary) and `docker doctor` passes,
+because it only checks that the file exists. **Fix, in two levels:** the direct engine calls
+udocker through `sys.executable`, and the installer points the shebang at `$PREFIX/bin/env` —
+idempotently and always, including on a phone that already had udocker extracted (that was the
+trap: the fix used to live inside the download branch, so an updated device never ran it).
+
 ### Bonus: linker noise
 
 An amd64 image prints `WARNING: linker: failed to find ... /linkerconfig/ld.config.txt` on
@@ -297,7 +319,7 @@ the same with the ART path).
 ## Verification (reproduce it)
 
 ```sh
-bash verificar.sh          # the whole stack, 17 items
+bash verificar.sh          # the whole stack, 17 items (healthy footer: 0 FALHA)
 ```
 
 or individually:
