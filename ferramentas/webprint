@@ -57,8 +57,11 @@ case "$TAMANHO" in [0-9]*,[0-9]*) ;; *) erro "--tamanho exige LARGURA,ALTURA: $T
 absoluto() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$PWD" "$1" ;; esac; }
 
 PERFIL="${TMPDIR:-$PREFIX/tmp}/webprint-perfil-$$"
+# o HTML intermediario de --dom/--texto entra no trap: antes ele vazava nas
+# saidas por erro (timeout, DOM vazio)
+TMP="${TMPDIR:-$PREFIX/tmp}/webprint-$$.html"
 mkdir -p "$PERFIL"
-limpar() { rm -rf "$PERFIL" 2>/dev/null; }
+limpar() { rm -rf "$PERFIL" 2>/dev/null; rm -f "$TMP" 2>/dev/null; }
 trap limpar EXIT
 
 FLAGS=(--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage
@@ -86,7 +89,6 @@ case "$MODO" in
         printf '%s (%s)\n' "$DEST" "$(du -h "$DEST" | cut -f1)"
         ;;
     --dom)
-        TMP="${TMPDIR:-$PREFIX/tmp}/webprint-$$.html"
         timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" --dump-dom "$URL" \
             > "$TMP" 2>/dev/null
         rc=$?
@@ -100,7 +102,6 @@ case "$MODO" in
         fi
         ;;
     --texto)
-        TMP="${TMPDIR:-$PREFIX/tmp}/webprint-$$.html"
         timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" --dump-dom "$URL" \
             > "$TMP" 2>/dev/null
         rc=$?
