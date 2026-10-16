@@ -35,7 +35,7 @@ O comando `docker` é um **dispatcher** em `~/.hermes/bin/docker`:
 
 | camada | quando | o que dá |
 |---|---|---|
-| **daemon** (`udockerd` + CLI oficial 29.x em `~/docker-termux/bin/docker`) | sempre que o daemon sobe | `run`, `build`, `exec`, `logs`, TTY, `pull`, `ps`, API do Docker em `tcp://127.0.0.1:2375` |
+| **daemon** (`udockerd` + CLI oficial 29.x em `~/docker-termux/bin/docker`) | sempre que o daemon sobe | `run`, `build`, `exec`, `logs`, TTY, `pull`, `ps`, API do Docker em `unix://~/.udockerd/docker.sock` (0600) |
 | **direto** (`~/.hermes/bin/docker-direct`, udocker + proot na hora) | fallback se o daemon não subir | `run`, volumes, `-d` com log próprio; **sem** build/exec/logs |
 
 Ajudantes: `docker-daemon-up` (sobe desgarrado, pidfile, wake-lock),
@@ -93,9 +93,10 @@ imagem Docker, chamadas como comandos normais:
 |---|---|---|
 | `pdf` | Markdown -> PDF tipografado (weasyprint; capa, A4/letter, emoji, numeração) | `pdf-tool:1` |
 | `pdfpy` | roda qualquer helper da skill `pdf` (pypdf/reportlab/pdfplumber) | `pdf-tool:1` |
-| `webget` | baixa página e extrai texto/HTML/links (**nível 1**, sem navegador) | `web:1` |
+| `webget` | baixa página e extrai texto/HTML/links (**nível 1**, sem navegador) | nativo (`venv-web`); `web:1` se faltar o venv |
 | `webprint` | Chromium headless **nativo** (fora do container): `--dom` / `--texto` / `--pdf` / `--png` (**nível 2**) | — (usa `chromium-browser`) |
-| `webplay` | roda **seu** script de automação — **Selenium + chromedriver nativo**, com o helper `webauto.py` (**nível 3**) | — (usa o `chromium` do Termux) |
+| `webcdp` | CDP puro, **sem Selenium**: `--texto` / `--titulo` / `--html` / `--js` / `--screenshot` (**nível 3**, o mais rápido; só http/https) | — (usa `chromium-browser`) |
+| `webplay` | roda **seu** script de automação — **Selenium + chromedriver nativo**, com o helper `webauto.py` (**nível 3b**) | — (usa o `chromium` do Termux) |
 
 Fontes em `~/docker-termux/imagens/<nome>/`; cópia publicada em
 `github.com/Padilha-BR/docker-termux`. Cada comando constrói a imagem na primeira
@@ -181,10 +182,12 @@ qualquer sistema com cota compartilhada, com ou sem container.
 
 ## Armadilhas que custam tempo
 
-- **`-v` NÃO aceita sufixo `:ro`/`:rw`.** `-v /host/script.py:/ctr/script.py:ro`
-  não monta nada e ainda cria um arquivo chamado **`script.py:ro`** dentro do
-  destino — o container então falha com `can't open file '/ctr/script.py'`. Use
-  sempre a forma pura `-v origem:destino`. (Binds de arquivo **e** de diretório
+- **O udocker NÃO aceita sufixo `:ro`/`:rw`.** Passado cru,
+  `-v /host/script.py:/ctr/script.py:ro` não monta nada e ainda cria um arquivo
+  chamado **`script.py:ro`** dentro do destino — o container então falha com
+  `can't open file '/ctr/script.py'`. O `docker-direct` agora remove o sufixo e
+  **avisa**, mas o bind fica **gravável** (`ro` não é garantido). Prefira a forma
+  pura `-v origem:destino`. (Binds de arquivo **e** de diretório
   funcionam assim: o proot cria o ponto de montagem, desde que o caminho não
   tenha opção colada.) Verificação de que o bind pegou:
   `sha256sum` do arquivo dentro e fora devem bater.
@@ -196,19 +199,22 @@ qualquer sistema com cota compartilhada, com ou sem container.
   `~/.udockerd/logs/exec/`.
 - **O supervisor do udockerd compila on first use** (`~/.udockerd/udockerd-supervisor-*`);
   precisa de `cc`/`clang`. Sem ele, `docker logs` do container principal fica vazio.
-- **`curl` não entende `tcp://`**: para checar o daemon use
-  `http://127.0.0.1:2375/_ping` (o `DOCKER_HOST` é que é `tcp://`).
+- **O daemon fala por socket Unix**, não TCP: para checar à mão use
+  `curl --unix-socket ~/.udockerd/docker.sock http://localhost/_ping` (o
+  `DOCKER_HOST` é `unix://...`; `DOCKER_DAEMON_TCP=1` traz o `127.0.0.1:2375`
+  antigo, sem autenticação — não recomendado).
 - **Uma arquitetura por tag**: `pull --platform=linux/amd64 alpine:latest`
   sobrescreve a imagem arm64 local daquela tag. Para voltar, pull sem `--platform`.
 - **O builder do daemon NÃO tem cache de camadas**: mudar o `Dockerfile` refaz apt+pip
 do zero (5-20 min). Por isso o código que muda com frequência (ex.: `md2pdf`,
-`webget.py`, `webprint.py`) é **montado** do celular no container em vez de
+`webget.py`) é **montado** do celular no container em vez de
 copiado na imagem — editar o script não exige rebuild.
 - **Nunca reconstrua imagem com containers rodando**, e não reinicie o daemon
 durante um build.
 - Imagens pesadas: `manim-celular:1` ~1,5 GB, `pdf-tool:1` ~718 MB, `web:1` ~86 MB.
-Confira espaço antes (`df -h ~`). **Não reconstrua a imagem de navegador:** nenhum wrapper a
-usa (Chromium não roda sob proot) e ~1,5 GB só para isso não se paga — o headless é nativo. As
+Confira espaço antes (`df -h ~`). A antiga imagem de navegador (`navegador:1`) saiu do repo:
+nenhum wrapper a usava (Chromium não roda sob proot) e ~1,5 GB só para isso não se pagava — o
+headless é nativo. As
 imagens não podem diferir por *tag* apenas: uma imagem por arquitetura, ver acima.
 - **Nunca `pkill -f udockerd`**: a própria linha de comando casa com o padrão e
   mata a sua shell (e o daemon). Use o pidfile: `docker daemon down`.
@@ -216,7 +222,9 @@ imagens não podem diferir por *tag* apenas: uma imagem por arquitetura, ver aci
   é encerrado com SIGKILL (um `timeout` estourando, um Chromium travado), o `--rm`
   nunca roda e o diretório do contêiner fica com uma **cópia completa da imagem**.
   Medido no aparelho: 8 × `navegador:1` + 1 × `ubuntu:24.04` = **10,6 GB** parados
-  sem ninguém usando. Confira com
+  sem ninguém usando. (Ctrl-C e `SIGTERM` já não causam isso: o `docker-direct`
+  repassa o sinal e roda o `--rm` no fim; só SIGKILL ainda deixa sobra, e um
+  `-d --rm` é limpo no `docker stop` ou no próximo `docker ps`.) Confira com
   `~/docker-termux/udocker-1.3.17/udocker/udocker ps` (`W` na coluna de estado =
   parado; PID vazio = não está rodando) e limpe com `udocker rm <id>` — nunca um
   que apareça rodando. Depois da limpeza o motor segue normal (o rootfs é
@@ -243,16 +251,18 @@ imagens não podem diferir por *tag* apenas: uma imagem por arquitetura, ver aci
 
 ## Antes de dizer "isso é novo" — prior art e alternativas
 
-`references/prior-art-e-alternativas.md` reúne o que já existe publicado para containers no
+No repositório docker-termux, a seção "O que já existia antes" do `README.pt-BR.md`, a §4 do
+`CAPACIDADES.pt-BR.md` e o `AUTHORS.pt-BR.md` reúnem o que já existe publicado para containers no
 Android (udocker empacotado no APT do Termux, `Termux-Udocker`, `udockerd`, `cdriv`, `proot-distro`,
 e os caminhos QEMU/root para Docker **de kernel**) e o que cada um resolve. Leia antes de reivindicar
 ineditismo, antes de escolher caminho e antes de publicar — o usuário exige a seção "o que já
 existia antes", e checar prior art converte "sou o primeiro" (frágil) em "não achei publicado"
 (verificável).
 
-Para medir o custo real de qualquer comando no aparelho (tempo + pico de RAM por amostragem de
-`/proc`): `scripts/medir-custo.py "<rótulo>" <comando>`. Foi o instrumento que produziu a tabela
-headless acima — os ~1 GB do Chromium nativo surpreendem e vale reconferir em aparelho novo.
+Para medir o custo real no aparelho (tempo + pico de RAM por amostragem de `/proc`):
+`bash testes/benchmark-headless.sh [url-estatica] [url-js]` no repositório — a função `medir`
+dele serve para qualquer comando. Foi o instrumento que produziu a tabela headless acima — os
+~1 GB do Chromium nativo surpreendem e vale reconferir em aparelho novo.
 
 ## Antes de instalar por tarball: o pacote oficial já resolve metade
 

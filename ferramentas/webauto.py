@@ -5,9 +5,9 @@ de verdade aqui e chromedriver (vem no pacote `chromium` do Termux) + selenium.
 
 Uso dentro do seu script:
 
-    from webauto import abrir, esperar
+    from webauto import sessao, esperar
 
-    with abrir() as d:
+    with sessao() as d:      # fecha o Chrome e apaga o perfil temporario
         d.get("https://example.com")
         print(d.title)
         esperar(d, "button#enviar", por="css").click()
