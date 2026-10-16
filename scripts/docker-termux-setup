@@ -145,19 +145,23 @@ if [ ! -x "$BIN" ] || [ "$FORCE" = 1 ]; then
     rm -rf "$BASE/udocker-$VERSAO_UDOCKER"
     cp -a "$TMPD/udocker-$VERSAO_UDOCKER" "$BASE/"
     chmod +x "$BIN"
-    # O tarball oficial do udocker tem shebang `#!/usr/bin/env python`, e no
-    # Android NAO existe /usr/bin/env. Ate o Android 16 o termux-exec reescrevia
-    # esse shebang; no Android 17 ele deixou de reescrever, e executar o binario
-    # direto morre com "bad interpreter: No such file or directory". Isso derruba
-    # o modo direto inteiro (run -v, pull, rm) e ate o `$BIN install` num aparelho
-    # limpo. Aponta para o caminho real do Termux (idempotente).
-    MAINCMD="$BASE/udocker-$VERSAO_UDOCKER/udocker/maincmd.py"
-    if [ -f "$MAINCMD" ] && head -1 "$MAINCMD" | grep -q '^#!/usr/bin/env'; then
-        sed -i "1s|.*|#!$PREFIX/bin/env python|" "$MAINCMD"
-        verde "  shebang do udocker apontado para o Termux"
-    fi
 else
     echo "  ja instalado: $BIN"
+fi
+# Shebang do udocker FORA do ramo de instalacao (16/10/2026): o tarball oficial
+# traz `#!/usr/bin/env python` e /usr/bin/env NAO existe no Android. Ate o
+# Android 16 o termux-exec reescrevia esse shebang; no 17 parou de reescrever.
+# Quem ATUALIZOU o aparelho ja tem o udocker extraido, entao cai no "ja
+# instalado" — e o conserto que morava no ramo do download nunca rodava. Efeito
+# medido: o modo DIRETO funcionava e o caminho do DAEMON morria com
+# "OCI runtime create failed: [Errno 2] No such file or directory", porque o
+# udockerd executa este script e o kernel nao achava /usr/bin/env. So execucao,
+# idempotente, sempre. `udocker/udocker` e symlink deste arquivo: um conserto
+# cobre os dois.
+MAINCMD="$BASE/udocker-$VERSAO_UDOCKER/udocker/maincmd.py"
+if [ -f "$MAINCMD" ] && head -1 "$MAINCMD" | grep -q '^#!/usr/bin/env'; then
+    sed -i "1s|.*|#!$PREFIX/bin/env python|" "$MAINCMD"
+    verde "  shebang do udocker apontado para o Termux ($MAINCMD)"
 fi
 # UMA fonte da versao: o docker-direct e o dispatcher leem este arquivo
 # (antes o motor tinha 1.3.17 fixo e divergia de UDOCKER_VERSAO)
@@ -306,7 +310,12 @@ passo "7/9 comandos em $MEUBIN e fontes das imagens em $BASE/imagens"
 # o `udocker` ponte e as imagens ficavam de fora, e quem nao clonava em
 # ~/docker-termux ficava com as ferramentas quebradas.
 FERRAMENTAS="$RAIZ/ferramentas"
+# `docker-termux-setup` entra na lista: sem ele o comando instalado no PATH fica
+# na versao antiga (medido em 16/10/2026: o do PATH era de 15/10, 11501 bytes,
+# enquanto o do repo tinha 18888 — quem roda `docker-termux-setup` sem clonar
+# rodava o instalador velho, sem os consertos).
 for s in docker docker-direct docker-daemon-up docker-daemon-down udockerd-unix udocker \
+         docker-termux-setup \
          pdf pdfpy webget webprint webcdp webcdp.py webplay webauto.py; do
     origem="$SCRIPTS/$s"
     [ -f "$origem" ] || origem="$FERRAMENTAS/$s"
@@ -393,7 +402,34 @@ if command -v docker >/dev/null 2>&1; then
     passo "verificacao"
     docker doctor || true
     passo "teste real"
-    docker run --rm alpine sh -c "echo 'docker rodando:' \$(uname -m)" 2>&1 | tail -2
+    # Este teste TEM de valer como prova. Em 16/10/2026 ele nao valia: um
+    # `| tail -2` engolia a falha e o script ainda imprimia "Instalacao
+    # concluida" com o `docker run` morto em "OCI runtime create failed:
+    # [Errno 2]". Causa medida naquele dia: o daemon estava no ar desde ANTES
+    # das atualizacoes (responde na API, entao `docker-daemon-up` sai cedo por
+    # ser idempotente) e o caminho dele quebrava; reiniciar o daemon resolveu.
+    # Agora: falha conta como pendencia, e o restart e tentado UMA vez — so
+    # quando nao ha container em execucao (nao derrubo trabalho alheio).
+    teste() {
+        docker run --rm alpine sh -c "echo 'docker rodando:' \$(uname -m)" 2>&1 | tail -2
+    }
+    saida="$(teste)"
+    echo "  $saida"
+    if ! printf '%s' "$saida" | grep -q 'docker rodando:'; then
+        if [ -z "$(docker ps -q 2>/dev/null)" ] && [ -x "$MEUBIN/docker-daemon-down" ] \
+           && [ -x "$MEUBIN/docker-daemon-up" ]; then
+            amarelo "  falhou com o daemon atual — reiniciando (codigo antigo em execucao) e repetindo"
+            ( bash "$MEUBIN/docker-daemon-down" >/dev/null 2>&1 || true )
+            ( bash "$MEUBIN/docker-daemon-up" >/dev/null 2>&1 || true )
+            saida="$(teste)"
+            echo "  $saida"
+        fi
+        if ! printf '%s' "$saida" | grep -q 'docker rodando:'; then
+            vermelho "  o caminho do DAEMON nao esta funcionando (log: $BASE/logs/udockerd.log)"
+            amarelo "  o modo direto segue funcionando: docker-direct run --rm alpine echo ok"
+            falhou=1
+        fi
+    fi
 else
     amarelo "export PATH=$MEUBIN:\$PATH  e rode: docker doctor"
 fi
