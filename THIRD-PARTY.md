@@ -22,7 +22,7 @@ covers only the scripts and documentation written here.
 
 - `scripts/` — the dispatcher, the direct engine, the daemon lifecycle and the installer
 - `ferramentas/` — `pdf`, `pdfpy`, `webget`, `webprint`, `webcdp`, `webplay` and `webauto.py`
-- `imagens/` — Dockerfiles **and the original sources** (`md2pdf`, `webget.py`, `webprint.py`)
+- `imagens/` — Dockerfiles **and the original sources** (`md2pdf`, `webget.py`)
 - `testes/`, `examples/`, `verificar.sh`, `CAPACIDADES.md`, `AUTHORS.md`
 
 Details on what already existed before are in [`AUTHORS.md`](AUTHORS.md); what the device

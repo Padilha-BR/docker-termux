@@ -22,7 +22,7 @@ MIT deste repositório cobre apenas os scripts e a documentação escritos aqui.
 
 - `scripts/` — o dispatcher, o motor direto, o ciclo do daemon e o instalador
 - `ferramentas/` — `pdf`, `pdfpy`, `webget`, `webprint`, `webcdp`, `webplay` e `webauto.py`
-- `imagens/` — Dockerfiles **e as fontes autorais** (`md2pdf`, `webget.py`, `webprint.py`)
+- `imagens/` — Dockerfiles **e as fontes autorais** (`md2pdf`, `webget.py`)
 - `testes/`, `examples/`, `verificar.sh`, `CAPACIDADES.md`, `AUTHORS.md`
 
 Detalhamento do que já existia antes em [`AUTHORS.md`](AUTHORS.pt-BR.md); o que o
