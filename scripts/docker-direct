@@ -137,7 +137,7 @@ def udocker(args, capturar=False, silencioso=False):
     if not os.path.exists(UDOCKER):
         err("runtime nao instalado em %s — rode: docker-termux-setup" % UDOCKER)
         sys.exit(2)
-    cmd = [UDOCKER] + ["--quiet"] * silencioso + args
+    cmd = [sys.executable, UDOCKER] + ["--quiet"] * silencioso + args
     if capturar:
         return subprocess.run(cmd, env=ambiente(), stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, text=True)
@@ -408,7 +408,7 @@ def criar_container(img, nome=None):
     args.append(img)
     # stdout e stderr SEPARADOS: o udocker imprime o id no stdout e avisos no
     # stderr; misturados, um aviso na ultima linha virava o "id" do container
-    r = subprocess.run([UDOCKER] + args, env=ambiente(), stdout=subprocess.PIPE,
+    r = subprocess.run([sys.executable, UDOCKER] + args, env=ambiente(), stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, text=True)
     if r.returncode != 0:
         err("falha ao criar container a partir de %s\n%s"
@@ -1017,7 +1017,7 @@ def rodar_primeiro_plano(args, ao_terminar=None):
         except OSError:
             pass
 
-    p = subprocess.Popen([UDOCKER] + args, env=ambiente())
+    p = subprocess.Popen([sys.executable, UDOCKER] + args, env=ambiente())
     antigos = {}
     for nome in ("SIGTERM", "SIGHUP"):
         s = getattr(signal, nome, None)
@@ -1118,7 +1118,7 @@ def cmd_run(argv):
             os.makedirs(LOGDIR, exist_ok=True)
             log = log_path(alvo_container)
             with open(log, "wb") as f:
-                p = subprocess.Popen([UDOCKER] + args, env=ambiente(),
+                p = subprocess.Popen([sys.executable, UDOCKER] + args, env=ambiente(),
                                      stdout=f, stderr=subprocess.STDOUT,
                                      stdin=subprocess.DEVNULL, start_new_session=True)
             # rm: o docker remove o container quando ele para; aqui isso acontece
