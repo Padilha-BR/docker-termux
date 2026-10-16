@@ -12,6 +12,10 @@ metadata:
 
 # Docker no Termux (Android, sem root, sem daemon de kernel)
 
+> `platforms` inclui `android` de propósito, mesmo sendo valor fora da lista que o lint espera:
+> com `[linux]` o Hermes **recusa carregar esta skill no celular** (`unsupported on this platform`),
+> e é justamente no Android/Termux que ela é usada. Não "conserte" para `[linux]`.
+
 ## When to Use
 
 - Pedido de "docker no Termux/celular", container, imagem do Docker Hub, build de
@@ -35,8 +39,17 @@ O comando `docker` é um **dispatcher** em `~/.hermes/bin/docker`:
 
 | camada | quando | o que dá |
 |---|---|---|
-| **daemon** (`udockerd` + CLI oficial 29.x em `~/docker-termux/bin/docker`) | sempre que o daemon sobe | `run`, `build`, `exec`, `logs`, TTY, `pull`, `ps`, API do Docker em `unix://~/.udockerd/docker.sock` (0600) |
+| **daemon** (`udockerd` + CLI oficial 29.x em `~/docker-termux/bin/docker`) | sempre que o daemon sobe | `run`, `build`, `exec`, `logs`, TTY, `pull`, `ps`, API do Docker em **socket Unix** (`unix://~/.udockerd/docker.sock`, modo 0600) |
 | **direto** (`~/.hermes/bin/docker-direct`, udocker + proot na hora) | fallback se o daemon não subir | `run`, volumes, `-d` com log próprio; **sem** build/exec/logs |
+
+**Transporte do daemon: socket Unix com modo 0600, NÃO TCP.** A API do Docker não
+autentica ninguém e, no Android, o loopback é alcançável por qualquer app com
+permissão de rede — pelo TCP em `127.0.0.1:2375`, um app de terceiro poderia rodar
+container com a home montada e ler arquivos do Termux. O `udockerd` só fala TCP,
+então `scripts/udockerd-unix` serve **o mesmo handler e as mesmas rotas dele** sobre
+`AF_UNIX` (troca só a classe de servidor). `DOCKER_DAEMON_TCP=1` volta ao TCP (não
+recomendado); um daemon TCP legado no ar é detectado e encerrado pelo `daemon up`.
+Verificação: `bash verificar.sh` inclui o item "socket do daemon privado" (espera 600).
 
 Ajudantes: `docker-daemon-up` (sobe desgarrado, pidfile, wake-lock),
 `docker-daemon-down` (encerra o grupo de processos), `docker-termux-setup`
@@ -110,6 +123,7 @@ execução (avisa).
 | 2 | `webprint` (Chromium **nativo**, sem container) | página precisa de JS, ninguém precisa clicar | 2,9 s (estática) / 4,7 s (SPA) | **OK (medido)** |
 | 3 | `webcdp` (CDP puro, **sem Selenium**) | leitura + JS + screenshot — mais rápido que o Selenium | 1,9-2,5 s, ~1 GB | **OK (medido)** |
 | 3b | `webplay` (Selenium + chromedriver) | clique/formulário com API familiar | 4,0-4,8 s, ~1 GB | **OK (medido)** |
+| 3c | `playwright-core` **via Node/npm** (não Python) | script que quer a API do Playwright (auto-wait, locator, tracing) — escrito em JS | arranque **0,5 s** + SPA **1,4 s**, ~830 MB | **OK (medido)** |
 
 **Nenhum Chromium sobrevive ao `proot`** (medido: Chrome for Testing 156 e
 `chrome-headless-shell` 156, arm64 nativos). Sintomas: `Trace/breakpoint trap`
@@ -151,12 +165,39 @@ que trava 70 s se você errar: o `webSocketDebuggerUrl` de `/json/version` é o
 endpoint do **browser**, e comandos `Page.*` nele não respondem — é preciso o alvo
 de **página** (`/json/list`, `type == "page"`). Exit 3 = página sem conteúdo.
 
-**Nível 3b = Selenium, não Playwright**: o Playwright não tem wheel para Android
-(`pip install playwright` → `No matching distribution found`). O caminho é
-`chromedriver` (vem no pacote `chromium`, mesma versão) + `selenium` (Python puro,
-instalado em `~/docker-termux/venv-web`). O helper `webauto.py` já traz as flags do
-Android e `webplay script.py` roda seu script. Medido: clique real, espera por
-elemento e screenshot OK em 4,0-4,8 s.
+**Nível 3b é Selenium (o wrapper `webplay`) — o nome engana e não é Playwright.** O motor é
+`chromedriver` (vem no pacote `chromium`, mesma versão) + `selenium` (Python puro, instalado em
+`~/docker-termux/venv-web`); o helper `webauto.py` já traz as flags do Android. Medido: clique real,
+espera por elemento e screenshot OK em 4,0-4,8 s.
+
+**Nível 3c: o Playwright RODA aqui — via Node, não Python.** "Não tem wheel para Android" não é
+"é impossível": em Python não existe mesmo (`pip install playwright` → `No matching distribution
+found`), mas em **Node/npm funciona** — medido, 3/3 rodadas. Duas chaves, e a primeira trava tudo:
+
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm i playwright-core   # o browser dele é glibc, não roda aqui
+    PLAYWRIGHT_BROWSERS_PATH=0 node script.js                  # sem isso aborta na largada
+
+- **`PLAYWRIGHT_BROWSERS_PATH=0`**: sem ela o Playwright morre com `Unsupported platform: android`,
+  lançado pelo próprio `computeDefaultCacheDirectory()` dele (que só conhece darwin/linux/win32).
+- **`executablePath`** apontando para `$PREFIX/bin/chromium-browser`: o Chromium que ele baixaria é
+  glibc e não roda em bionic — e como ele fala CDP puro, o nativo serve.
+
+Medido: navegador no ar **0,5 s**, `react.dev` renderizado **1,4 s** (6583 chars), `locator().innerText()`
+com auto-wait 0,2-0,4 s, screenshot PNG **1280×720 válido**, pico ~830 MB, total 3,0-3,2 s. Ganha lugar
+quando o script quer a *API* (auto-wait, locator, tracing) e o autor aceita escrever em JS; para texto
+puro o nível 1 continua ganhando feio (1,7 s / 34 MB).
+
+Duas regras que este caso ensina e que valem além dele:
+
+- **"Não tem wheel" ≠ "não roda": teste a outra runtime antes de escrever veredito negativo.** Um
+  "X não existe para Android" publicado sem qualificar a linguagem custa a quem lê exatamente a
+  capacidade que existia (`pip install playwright` falha; `npm i playwright-core` funciona).
+- **Timeout de `locator` em elemento que não existe é o comportamento CORRETO (auto-wait), não bug.**
+  Antes de acusar a ferramenta, confirme no DOM (`page.content()`, `locator(sel).count()`): a página
+  realmente não tinha o elemento. Diagnóstico na ordem errada faz parecer API quebrada o que é
+  expectativa errada do teste.
+- Nomeie wrapper pelo **motor**, não pelo efeito: `webplay` roda Selenium, e o nome já custou uma
+  explicação confusa ao usuário.
 
 **Escolha pelo recurso escasso, não só pelo tempo**: em página estática o nível 1
 gasta 4,3 s e ~34 MB, o nível 2 gasta 2,8 s e **~1 GB** (o Chromium nativo tem
@@ -179,6 +220,23 @@ Navegador automatizado abre sessão de verdade. Se o serviço cobra ou limita
 logins concorrentes (planos com número fixo de acessos), **prefira HTTP puro**
 (`requests`) em vez de navegador — a automação não muda a cota, agrava. Vale para
 qualquer sistema com cota compartilhada, com ou sem container.
+
+## Pitfall: shebang `/usr/bin/env` morreu no Android 17
+
+O tarball oficial do udocker instala `maincmd.py` com `#!/usr/bin/env python`, e no Android **não
+existe `/usr/bin/env`**. Até o Android 16 o `termux-exec` reescrevia esse shebang; **no Android 17
+ele parou de reescrever**, e executar o binário pelo caminho morre com `bad interpreter: No such
+file or directory` (ou `FileNotFoundError` no Python).
+
+O sintoma **engana**: o daemon continua funcionando (importa a lib do udocker em Python, não executa
+o binário) e o `doctor` passa (só confere que o arquivo existe). Cai só o modo direto — `run -v`,
+`pull`, `rm` — o que parece bug do parser de mounts. Um script trivial com o mesmo shebang reproduz.
+
+Regra: **nunca execute o binário do udocker pelo caminho**. Use
+`subprocess.run([sys.executable, UDOCKER] + args)`. Antes de culpar o código, compare
+`python3 <bin> --version` (funciona) com `<bin> --version` (morre) — isso separa ambiente de
+regressão. No instalador, aponte o shebang para `$PREFIX/bin/env` (idempotente): é o que faz até o
+`$BIN install` funcionar num aparelho limpo.
 
 ## Pitfall: `OCI runtime create failed: [Errno 2]` = daemon VELHO em execução (medido 16/10/2026)
 
@@ -222,27 +280,60 @@ provar nada.
   com a CLI direta (supervisor já compilado): `run -d` -> vazio, `run -dt` -> saída.
   O dispatcher insere `-t` em `run -d` e avisa. Logs de `exec` ficam em
   `~/.udockerd/logs/exec/`.
+- **O instalador verifica hash dos downloads** (`checksums.txt` na raiz do repo, função
+  `conferir_hash`): nem o udocker nem a Docker publicam `.sha256` para esses artefatos,
+  então os hashes são pinados no repo e um arquivo diferente **aborta** a instalação.
+  Versão fora do pin é reportada com o hash obtido, nunca aceita em silêncio. O
+  `udockerd` é instalado pinado (`==0.3.5`). Para mudar de versão: use
+  `UDOCKER_VERSAO`/`DOCKER_CLI_VERSAO`/`UDOCKERD_VERSAO` e acrescente o hash novo.
+- **O instalador tem UMA fonte**: `scripts/docker-termux-setup`; o `docker-termux-setup`
+  da raiz é só um chamador de 3 linhas (antes eram duas cópias idênticas). Ele resolve
+  sozinho onde estão `scripts/` e `checksums.txt` rodando da raiz, do `scripts/` ou de
+  `~/.hermes/bin`.
+- **Atualizar o aparelho = rodar o setup DO REPO e depois REINICIAR o daemon.** O setup copia os
+  comandos para `$MEUBIN` (ele agora também se copia: antes o `docker-termux-setup` do PATH ficava na
+  versão antiga, e quem o rodava sem clonar não pegava conserto nenhum) e **não reinicia o daemon** —
+  o `docker-daemon-up` é idempotente e sai cedo com a API respondendo, então o processo vivo segue no
+  código velho. Sem esse restart o sintoma é "instalei e continua quebrado".
+- **Validação que decide, não que narra:** o passo final do setup precisa exigir a MARCA esperada na
+  saída (`grep -q 'docker rodando:'`) e contar a ausência como pendência. Um `cmd | tail -2` só
+  imprime: com ele o setup anunciou "Instalacao concluida" com o `docker run` morto em `OCI runtime
+  create failed` — telemetria apresentada como verificação.
+- **Nunca use `pkill -f <padrão>` com um padrão que apareça no seu próprio comando**:
+  o shell se mata (aconteceu com `udockerd-unix` e com `lib/chromium/chrome`). Para matar
+  processo por linha de comando, liste os PIDs em Python excluindo `os.getpid()`/`getppid()`
+  e cheque o argumento exato (`args[1].endswith('udockerd-unix')`), não a string solta.
 - **O supervisor do udockerd compila on first use** (`~/.udockerd/udockerd-supervisor-*`);
   precisa de `cc`/`clang`. Sem ele, `docker logs` do container principal fica vazio.
 - **O daemon fala por socket Unix**, não TCP: para checar à mão use
-  `curl --unix-socket ~/.udockerd/docker.sock http://localhost/_ping` (o
-  `DOCKER_HOST` é `unix://...`; `DOCKER_DAEMON_TCP=1` traz o `127.0.0.1:2375`
-  antigo, sem autenticação — não recomendado).
+  `curl --unix-socket ~/.udockerd/docker.sock http://localhost/_ping` (o `DOCKER_HOST` é
+  `unix://...`; `curl` não entende `tcp://`). O TCP só existe com `DOCKER_DAEMON_TCP=1`,
+  sem autenticação — não recomendado. O `docker daemon status` já responde isso.
+- **Porta de debug fixa pode não ser o seu navegador.** `--remote-debugging-port=9222` é a porta de
+  todo mundo: se outro Chromium já estiver nela, o `/json/list` devolve o browser **alheio** e o script
+  navega e executa JS na sessão de outro sem erro nenhum — o sintoma é um resultado que não corresponde
+  à URL pedida. Suba com porta `0` e leia `DevToolsActivePort` do próprio perfil, ou confirme de quem é
+  o alvo antes de agir.
 - **Uma arquitetura por tag**: `pull --platform=linux/amd64 alpine:latest`
   sobrescreve a imagem arm64 local daquela tag. Para voltar, pull sem `--platform`.
 - **O builder do daemon NÃO tem cache de camadas**: mudar o `Dockerfile` refaz apt+pip
 do zero (5-20 min). Por isso o código que muda com frequência (ex.: `md2pdf`,
-`webget.py`) é **montado** do celular no container em vez de
+`webget.py`, `webprint.py`) é **montado** do celular no container em vez de
 copiado na imagem — editar o script não exige rebuild.
 - **Nunca reconstrua imagem com containers rodando**, e não reinicie o daemon
 durante um build.
 - Imagens pesadas: `manim-celular:1` ~1,5 GB, `pdf-tool:1` ~718 MB, `web:1` ~86 MB.
-Confira espaço antes (`df -h ~`). A antiga imagem de navegador (`navegador:1`) saiu do repo:
-nenhum wrapper a usava (Chromium não roda sob proot) e ~1,5 GB só para isso não se pagava — o
-headless é nativo. As
+Confira espaço antes (`df -h ~`). **Não reconstrua a imagem de navegador**: a antiga (`navegador:1`) saiu do repo
+porque nenhum wrapper a
+usava (Chromium não roda sob proot) e ~1,5 GB só para isso não se paga — o headless é nativo. As
 imagens não podem diferir por *tag* apenas: uma imagem por arquitetura, ver acima.
-- **Nunca `pkill -f udockerd`**: a própria linha de comando casa com o padrão e
-  mata a sua shell (e o daemon). Use o pidfile: `docker daemon down`.
+- **Nunca `pgrep -f`/`pkill -f` com padrão que aparece na sua própria linha de comando.** O
+  casamento é contra a linha de comando de **todos** os processos, incluindo a shell que está
+  rodando o `pgrep`. Dois jeitos de se derrubar sozinho: `pkill -f udockerd` mata a sua shell junto
+  (e o daemon), e um `pgrep -f <caminho>` casa com o próprio comando que apenas *menciona* aquele
+  caminho — a sessão morre no meio da limpeza, com a impressão de que o alvo é que resistiu.
+  Identifique pelo executável real (`readlink /proc/<pid>/exe`) e mate por **PID explícito**; para o
+  daemon, use o pidfile (`docker daemon down`).
 - **Contêiner morto à força deixa o rootfs inteiro para trás.** Quando o processo
   é encerrado com SIGKILL (um `timeout` estourando, um Chromium travado), o `--rm`
   nunca roda e o diretório do contêiner fica com uma **cópia completa da imagem**.
@@ -276,18 +367,50 @@ imagens não podem diferir por *tag* apenas: uma imagem por arquitetura, ver aci
 
 ## Antes de dizer "isso é novo" — prior art e alternativas
 
-No repositório docker-termux, a seção "O que já existia antes" do `README.pt-BR.md`, a §4 do
-`CAPACIDADES.pt-BR.md` e o `AUTHORS.pt-BR.md` reúnem o que já existe publicado para containers no
+O resumo publicável vive no repositório — seção "O que já existia antes" do `README.pt-BR.md`, §4 do
+`CAPACIDADES.pt-BR.md` e `AUTHORS.pt-BR.md` — e o detalhe fica em
+`references/prior-art-e-alternativas.md` (desta skill). Tudo isso reúne o que já existe publicado para containers no
 Android (udocker empacotado no APT do Termux, `Termux-Udocker`, `udockerd`, `cdriv`, `proot-distro`,
 e os caminhos QEMU/root para Docker **de kernel**) e o que cada um resolve. Leia antes de reivindicar
 ineditismo, antes de escolher caminho e antes de publicar — o usuário exige a seção "o que já
 existia antes", e checar prior art converte "sou o primeiro" (frágil) em "não achei publicado"
 (verificável).
 
-Para medir o custo real no aparelho (tempo + pico de RAM por amostragem de `/proc`):
-`bash testes/benchmark-headless.sh [url-estatica] [url-js]` no repositório — a função `medir`
-dele serve para qualquer comando. Foi o instrumento que produziu a tabela headless acima — os
-~1 GB do Chromium nativo surpreendem e vale reconferir em aparelho novo.
+Duas regras que só aparecem testando as alternativas na prática:
+
+- **Meça a alternativa antes de estender ou substituir — e antes de aceitar que código próprio é
+  necessário.** Quando o pedido é "faz um X para o celular", baixe o que já existe, **execute** e
+  compare tempo/RAM/limitações. O usuário pediu isso de forma explícita ("pesquisa antes para
+  evitar coisas desnecessárias"); o resultado honesto pode ser que o stack local vire
+  *documentação* em vez de ferramenta, e isso se diz na cara.
+- **Teste o SEMÂNTICO, não a superfície, antes de documentar comportamento de terceiro.** Aceitar a
+  flag não é honrá-la: um engine monta o bind no lugar certo e **descarta o `:ro` em silêncio** — o
+  container escreveu no host. Teste o efeito (tentar escrever e conferir se o host mudou), nunca o
+  "não deu erro". Publicar "funciona" a partir de "o comando rodou" cria falsa sensação de
+  segurança em quem confiar no relato.
+
+Para medir o custo real de qualquer comando no aparelho (tempo + pico de RAM por amostragem de
+`/proc`): `bash testes/benchmark-headless.sh [url-estatica] [url-js]` no repositório (a função `medir`
+dele serve para qualquer comando) ou `scripts/medir-custo.py "<rótulo>" <comando>` (desta skill). Foi o instrumento que produziu a tabela
+headless acima — os ~1 GB do Chromium nativo surpreendem e vale reconferir em aparelho novo.
+
+## Direção do repositório (pedido do usuário)
+
+O alvo declarado: este repo ser a **descoberta de como dar ao Hermes no Android a capacidade do
+PC** — com crédito honesto e sem promessa que o aparelho não cumpre. Duas regras de conduta vêm
+disso:
+
+- **Deixe perfeitamente funcionando antes de expandir.** O usuário formula como "tá funcionando,
+  não mexe que senão estraga": preferência por consolidar e provar (bateria verde, auditoria
+  limpa) em vez de somar superfície nova. Antes de acrescentar capacidade, pergunte-se se ela cabe
+  no que já existe sem tornar o conjunto mais frágil.
+- **Documente o que NÃO funciona com o mesmo cuidado do que funciona.** É o que sustenta a
+  credibilidade do relato (a tabela "o que não pode", os becos sem saída, os custos escondidos).
+  O usuário cobra isso explicitamente e se incomoda com exagero em qualquer direção.
+
+Ao publicar: varra com `auditar-publicacao.py` **depois** da última edição (a skill
+`android-termux-hermes` traz a varredura e as regras de sanitização) e confirme no remoto por
+`git ls-remote`/API — não pelo exit code do `push`.
 
 ## Antes de instalar por tarball: o pacote oficial já resolve metade
 
@@ -313,6 +436,35 @@ monta), então esse é um bug legítimo a reportar upstream.
 
 O teste que pega o defeito 1 é `sh -c` com applet **externo** (`uname -m`), não
 `echo` (builtin). O que pega o defeito 2 é `apk add`/`apt-get install`.
+
+Bateria completa num comando (~2 min; **muda estado** — sobe o daemon, baixa imagem e roda
+container; não é "só leitura" e o cabeçalho dela diz isso):
+`bash ~/repos/docker-termux/verificar.sh` — bateria do stack inteiro (motor, socket privado do daemon,
+níveis 1/2/3 de headless, utilitários, órfãos, disco) com veredito no rodapé: o estado saudável é
+`0 FALHA` (leia o total do próprio rodapé em vez de chumbar — ele muda quando um item é pulado).
+Rode-a **depois de qualquer mudança** em vez de afirmar que funciona.
+
+Ao escrever ou mexer num script de verificação:
+
+- **`grep -q TOKEN` na saída inteira — nunca comparar a última linha com `==`.** O motor imprime
+  linhas `Info:` (criando/removendo container) depois da saída do processo, então a comparação
+  exata acusa falha num item que passou. Foi assim que `apk add` apareceu como "falha" passando 3/3
+  isolado.
+- **Rode a bateria duas vezes seguidas.** A segunda rodada é o que separa bug real de teste frágil;
+  um verificador que passa uma vez e falha na outra não serve para nada.
+- Casamento de texto deve ser contra um trecho do **corpo**, não a primeira linha: a primeira linha
+  de uma página extraída costuma ser o título, e o teste falha achando que o comando quebrou.
+- **Artefato binário se valida pelo conteúdo, não pela existência.** Depois de um `--screenshot`,
+  confira magic bytes e dimensões (`python3 -c` com `b[:8] == b"\x89PNG\r\n\x1a\n"` e
+  `struct.unpack(">II", b[16:24])`) — teste que só faz `[ -f arquivo ]` passa com PNG truncado ou
+  vazio, e num dos diagnósticos o `file` nem existe no aparelho. Foi assim que se provou que os
+  screenshots do nível 3 saíram em 1280×720 de verdade.
+- **Falso negativo é pior que não ter teste** — um verificador que mente treina quem o usa a
+  ignorá-lo, e aí ele deixa de proteger contra o que importa.
+- **Conte o que o SEU script deixou, não tudo que casa o padrão.** Tire um retrato dos PIDs antes de
+  começar e conte só os novos: o navegador persistente do agente (`chrome-cdp`, motor do `browser_exec`)
+  fica no ar por projeto, com perfil e aba próprios — um contador ingênuo o marca como órfão e o item
+  passa a falhar para sempre, o que ensina o dono do teste a ignorar a bateria inteira.
 
 ## O que NÃO existe neste modo
 
