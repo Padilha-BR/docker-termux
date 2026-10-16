@@ -14,8 +14,13 @@ Uso:
 
 Códigos de saída (mesma convenção do webget):
     0  conteúdo obtido
-    2  erro de uso / ambiente
+    2  erro de uso / ambiente / navegador que não respondeu
     3  página carregou mas o conteúdo veio vazio (provável JS que não rodou)
+
+Só aceita URL http(s): `file:///.../.ssh/id_rsa --texto` imprimia o arquivo, e
+num agente isso vira leitura local disparada por prompt injection. Cada execução
+usa um perfil TEMPORÁRIO (apagado no fim): cookies não vazam entre URLs e duas
+execuções em paralelo não disputam o mesmo perfil.
 
 Pegadinha que custa tempo (documentada na skill): o `webSocketDebuggerUrl` de
 `/json/version` é o endpoint do BROWSER — comandos `Page.*` nele travam sem
@@ -31,11 +36,14 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 try:
     import websockets
+    from websockets.exceptions import WebSocketException
 except ImportError:  # pragma: no cover
     print("erro: falta o pacote websockets (pip install websockets)", file=sys.stderr)
     raise SystemExit(2)
@@ -46,8 +54,7 @@ CHROME = os.environ.get("CHROMIUM_BIN", "chromium-browser")
 # ocupada e o /json/list devolvia o browser DE OUTREM — e o webcdp navegava e
 # executava JS la, sem perceber.
 PORTA = int(os.environ["CDP_PORTA"]) if os.environ.get("CDP_PORTA") else None
-PERFIL = os.path.join(os.environ.get("TMPDIR", "/data/data/com.termux/files/usr/tmp"),
-                      "webcdp-perfil")
+TMPDIR = os.environ.get("TMPDIR", "/data/data/com.termux/files/usr/tmp")
 # WEBCDP_ESPERA e o nome certo; WEBGDP_ESPERA e o typo antigo, mantido por compat
 ESPERA_CARGA = float(os.environ.get("WEBCDP_ESPERA",
                                      os.environ.get("WEBGDP_ESPERA", "45")))
@@ -73,14 +80,14 @@ def esperar_alvo(porta: int, timeout: float = 30) -> dict:
     raise TimeoutError("o devtools do chromium nao respondeu (ou sem alvo de pagina)")
 
 
-def porta_do_nosso_browser(timeout: float = 30) -> int:
+def porta_do_nosso_browser(perfil: str, timeout: float = 30) -> int:
     """Porta do Chromium que NOS lancamos, lida do proprio perfil.
 
     Com --remote-debugging-port=0 o Chromium escolhe a porta e grava a
     primeira linha em <user-data-dir>/DevToolsActivePort. E a unica forma de
     nao acabar dirigindo um browser que ja estava na 9222.
     """
-    arq = os.path.join(PERFIL, "DevToolsActivePort")
+    arq = os.path.join(perfil, "DevToolsActivePort")
     fim = time.time() + timeout
     while time.time() < fim:
         try:
@@ -154,6 +161,9 @@ def main() -> int:
 
     if not any([args.texto, args.html, args.titulo, args.js, args.screenshot]):
         args.texto = True
+    if urllib.parse.urlsplit(args.url).scheme.lower() not in ("http", "https"):
+        print(f"erro: so URL http(s) e aceita: {args.url!r}", file=sys.stderr)
+        return 2
 
     exprs: list[tuple[str, str]] = []
     if args.titulo:
@@ -170,21 +180,19 @@ def main() -> int:
               "(pkg install x11-repo && pkg install chromium)", file=sys.stderr)
         return 2
 
-    os.makedirs(PERFIL, exist_ok=True)
-    # DevToolsActivePort de uma rodada anterior apontaria para OUTRO browser
-    try:
-        os.remove(os.path.join(PERFIL, "DevToolsActivePort"))
-    except OSError:
-        pass
+    # perfil novo a cada execucao: sem DevToolsActivePort velho de outra rodada
+    # (que apontaria para OUTRO browser) e sem cookie de uma URL na seguinte
+    os.makedirs(TMPDIR, exist_ok=True)
+    perfil = tempfile.mkdtemp(prefix="webcdp-perfil-", dir=TMPDIR)
     porta = PORTA if PORTA is not None else 0
     proc = subprocess.Popen(
         [CHROME, "--headless=new", "--no-sandbox", "--disable-gpu",
          "--disable-dev-shm-usage", f"--remote-debugging-port={porta}",
-         f"--user-data-dir={PERFIL}", "about:blank"],
+         f"--user-data-dir={perfil}", "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         info = esperar_alvo(PORTA if PORTA is not None
-                            else porta_do_nosso_browser())
+                            else porta_do_nosso_browser(perfil))
         dados = asyncio.run(coletar(info["pagina_ws"], args.url, exprs))
 
         if args.screenshot:
@@ -208,12 +216,19 @@ def main() -> int:
                     fh.write(conteudo)
                 dados["screenshot"] = args.screenshot
         return _imprimir(dados, args)
+    except (TimeoutError, asyncio.TimeoutError, OSError,
+            WebSocketException) as e:
+        # navegador que nao subiu/nao respondeu e erro de ambiente (exit 2),
+        # nao traceback
+        print(f"erro: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        shutil.rmtree(perfil, ignore_errors=True)
 
 
 def _imprimir(dados: dict, args) -> int:

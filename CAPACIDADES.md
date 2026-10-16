@@ -112,7 +112,9 @@ containers (proot does not run systemd).
 - **A force-killed container leaves the whole rootfs** on disk: measured here, 8 orphan
   containers = **10.6 GB** sitting there.
 - **`-v` does not accept `:ro`** in udocker: the suffix becomes part of the filename and
-  the mount fails **silently**.
+  the mount fails **silently**. This repo's `docker-direct` strips the suffix and mounts,
+  but **warns loudly** that the bind stays writable — unlike Doki (§3.6.2), losing
+  read-only is not silent.
 
 ### 2.7 TCP on the loopback: the exposure that was removed
 
@@ -196,7 +198,7 @@ Two one-line bridges, in both directions:
 | you type | it goes to | why |
 |---|---|---|
 | `docker verify/protect/unprotect/mkrepo/setup/name/rmname/clone` | udocker | the Docker API has no such commands |
-| `udocker build/exec/logs/compose` | the repo's `docker` (daemon) | udocker has no such commands |
+| `udocker build/exec/logs` | the repo's `docker` (daemon) | udocker has no such commands; the `udocker` bridge the installer sets up delegates only these three (`compose` exists nowhere here) |
 | any other `docker …` | official CLI → daemon | normal behaviour |
 | any other `udocker …` | official udocker | same |
 

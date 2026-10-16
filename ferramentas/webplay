@@ -22,9 +22,12 @@
 #       esperar(d, "h1").text
 #       d.save_screenshot("print.png")
 set -uo pipefail
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
-VENV="$HOME/docker-termux/venv-web"
+VENV="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}/venv-web"
 PY="$VENV/bin/python"
+# o webauto.py e instalado ao lado deste wrapper
+AQUI="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")"
 
 erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
 
@@ -66,5 +69,5 @@ case "$SCRIPT" in
 esac
 
 # PYTHONPATH deixa `from webauto import ...` funcionar de qualquer diretorio.
-exec env PYTHONPATH="$HOME/.hermes/bin:${PYTHONPATH:-}" PYTHONUNBUFFERED=1 \
+exec env PYTHONPATH="$AQUI${PYTHONPATH:+:$PYTHONPATH}" PYTHONUNBUFFERED=1 \
     "$PY" "$ABS" "$@"

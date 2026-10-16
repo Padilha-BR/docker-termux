@@ -13,7 +13,9 @@
 #   webprint https://site.com --pdf  -o site.pdf
 #   webprint https://site.com --png  -o captura.png [--tamanho 900,700]
 #   webprint https://site.com --dom --espera 20000   (ms de JS; padrao 8000)
+#   (--html e sinonimo de --dom)
 set -uo pipefail
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 
 CHROME="${CHROMIUM_BIN:-chromium-browser}"
 TIMEOUT="${WEBPRINT_TIMEOUT:-90}"
@@ -33,10 +35,15 @@ command -v "$CHROME" >/dev/null 2>&1 || erro \
 URL=""; MODO=""; SAIDA=""; ESPERA=8000; TAMANHO="900,1200"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --dom|--html|--texto|--pdf|--png)  MODO="$1"; shift ;;
-        -o|--saida)      SAIDA="${2:-}"; [ -n "$SAIDA" ] || erro "-o exige um arquivo"; shift 2 ;;
-        --espera)        ESPERA="${2:-8000}"; shift 2 ;;
-        --tamanho)       TAMANHO="${2:-900,1200}"; shift 2 ;;
+        --dom|--html)    MODO="--dom"; shift ;;      # --html saia com 0 sem fazer nada
+        --texto|--pdf|--png)  MODO="$1"; shift ;;
+        # `shift 2` com um so argumento restante nao anda: era loop infinito
+        -o|--saida)      [ $# -ge 2 ] && [ -n "$2" ] || erro "$1 exige um arquivo"
+                         SAIDA="$2"; shift 2 ;;
+        --espera)        [ $# -ge 2 ] || erro "--espera exige milissegundos"
+                         ESPERA="$2"; shift 2 ;;
+        --tamanho)       [ $# -ge 2 ] || erro "--tamanho exige LARGURA,ALTURA"
+                         TAMANHO="$2"; shift 2 ;;
         http*)           URL="$1"; shift ;;
         -*)              erro "opcao desconhecida: $1" ;;
         *)               erro "argumento inesperado: $1" ;;
@@ -44,10 +51,17 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$URL" ]  || erro "informe a URL"
 [ -n "$MODO" ] || erro "informe o modo: --dom | --texto | --pdf | --png"
+case "$ESPERA" in ''|*[!0-9]*) erro "--espera exige milissegundos (numero): $ESPERA" ;; esac
+case "$TAMANHO" in [0-9]*,[0-9]*) ;; *) erro "--tamanho exige LARGURA,ALTURA: $TAMANHO" ;; esac
+# -o absoluto era colado no $PWD (/abs/x.png virava $PWD//abs/x.png)
+absoluto() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$PWD" "$1" ;; esac; }
 
 PERFIL="${TMPDIR:-$PREFIX/tmp}/webprint-perfil-$$"
+# o HTML intermediario de --dom/--texto entra no trap: antes ele vazava nas
+# saidas por erro (timeout, DOM vazio)
+TMP="${TMPDIR:-$PREFIX/tmp}/webprint-$$.html"
 mkdir -p "$PERFIL"
-limpar() { rm -rf "$PERFIL" 2>/dev/null; }
+limpar() { rm -rf "$PERFIL" 2>/dev/null; rm -f "$TMP" 2>/dev/null; }
 trap limpar EXIT
 
 FLAGS=(--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage
@@ -55,35 +69,26 @@ FLAGS=(--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage
        "--disable-features=Translate,BackForwardCache"
        --user-data-dir="$PERFIL" --virtual-time-budget="$ESPERA")
 
-gerar() {   # roda o chromium; $1 = destino (ou "" para stdout)
-    if [ -n "$1" ]; then
-        timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" "$@" "$URL" 2>/dev/null
-    else
-        timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" "$URL" 2>/dev/null
-    fi
-}
-
 case "$MODO" in
     --png)
-        DEST="${SAIDA:-pagina.png}"
+        DEST="$(absoluto "${SAIDA:-pagina.png}")"
         timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" --window-size="$TAMANHO" \
-            --screenshot="$PWD/$DEST" "$URL" 2>/dev/null
+            --screenshot="$DEST" "$URL" 2>/dev/null
         rc=$?
         [ "$rc" -eq 124 ] && erro "timeout de ${TIMEOUT}s ao capturar $URL"
-        [ -s "$PWD/$DEST" ] || erro "screenshot nao foi gerada"
-        printf '%s (%s)\n' "$PWD/$DEST" "$(du -h "$PWD/$DEST" | cut -f1)"
+        [ -s "$DEST" ] || erro "screenshot nao foi gerada"
+        printf '%s (%s)\n' "$DEST" "$(du -h "$DEST" | cut -f1)"
         ;;
     --pdf)
-        DEST="${SAIDA:-pagina.pdf}"
+        DEST="$(absoluto "${SAIDA:-pagina.pdf}")"
         timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" --no-pdf-header-footer \
-            --print-to-pdf="$PWD/$DEST" "$URL" 2>/dev/null
+            --print-to-pdf="$DEST" "$URL" 2>/dev/null
         rc=$?
         [ "$rc" -eq 124 ] && erro "timeout de ${TIMEOUT}s ao gerar PDF"
-        [ -s "$PWD/$DEST" ] || erro "PDF nao foi gerado"
-        printf '%s (%s)\n' "$PWD/$DEST" "$(du -h "$PWD/$DEST" | cut -f1)"
+        [ -s "$DEST" ] || erro "PDF nao foi gerado"
+        printf '%s (%s)\n' "$DEST" "$(du -h "$DEST" | cut -f1)"
         ;;
     --dom)
-        TMP="${TMPDIR:-$PREFIX/tmp}/webprint-$$.html"
         timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" --dump-dom "$URL" \
             > "$TMP" 2>/dev/null
         rc=$?
@@ -97,7 +102,6 @@ case "$MODO" in
         fi
         ;;
     --texto)
-        TMP="${TMPDIR:-$PREFIX/tmp}/webprint-$$.html"
         timeout "$TIMEOUT" "$CHROME" "${FLAGS[@]}" --dump-dom "$URL" \
             > "$TMP" 2>/dev/null
         rc=$?

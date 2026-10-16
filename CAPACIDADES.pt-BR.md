@@ -114,7 +114,9 @@ Sem systemd dentro dos containers (proot não roda systemd).
 - **Container morto à força deixa o rootfs inteiro** no disco: medido aqui, 8
   containers órfãos = **10,6 GB** parados.
 - **`-v` não aceita `:ro`** no udocker: o sufixo vira parte do nome do arquivo e a
-  montagem falha **em silêncio**.
+  montagem falha **em silêncio**. O `docker-direct` deste repo remove o sufixo e
+  monta, mas **avisa em voz alta** que o bind fica gravável — diferente do Doki
+  (§3.6.2), a perda do read-only não é silenciosa.
 
 ### 2.7 TCP no loopback: a exposição que foi removida
 
@@ -200,7 +202,7 @@ Duas pontes de uma linha cada, nas duas direções:
 | você digita | vai para | por quê |
 |---|---|---|
 | `docker verify/protect/unprotect/mkrepo/setup/name/rmname/clone` | udocker | a API do Docker não tem esses comandos |
-| `udocker build/exec/logs/compose` | `docker` do repo (daemon) | o udocker não tem esses |
+| `udocker build/exec/logs` | `docker` do repo (daemon) | o udocker não tem esses; a ponte `udocker` instalada pelo setup delega só esses três (`compose` não existe em lugar nenhum aqui) |
 | qualquer outro `docker …` | CLI oficial → daemon | comportamento normal |
 | qualquer outro `udocker …` | udocker oficial | idem |
 

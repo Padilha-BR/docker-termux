@@ -15,8 +15,14 @@
 set -uo pipefail
 
 IMG="web:1"
-FONTE="$HOME/docker-termux/imagens/web-leve"
-PY="$HOME/hermes-agent/venv/bin/python"
+BASE="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}"
+FONTE="$BASE/imagens/web-leve"
+# python com httpx+bs4: o venv-web do setup; o do Hermes continua aceito
+PY=""
+for candidato in "${WEBGET_PY:-}" "$BASE/venv-web/bin/python" "$HOME/hermes-agent/venv/bin/python"; do
+    [ -n "$candidato" ] && [ -x "$candidato" ] || continue
+    if "$candidato" -c "import httpx, bs4" >/dev/null 2>&1; then PY="$candidato"; break; fi
+done
 
 erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
 
@@ -30,10 +36,9 @@ esac
 # --- modo NATIVO primeiro (medido: 1,5 s contra 16 s no container) -----------
 # O proot cobra por entrada do diretorio montado: montar o $PWD (o $HOME tem
 # centenas de entradas) custa ~6 s, e o container sem bind nenhum ja custa 4 s.
-# O script so precisa de httpx/bs4/lxml, que o venv do Hermes tem — entao o
-# container virou fallback. Pula o modo nativo com WEBGET_CONTAINER=1.
-if [ "${WEBGET_CONTAINER:-0}" != "1" ] && [ -x "$PY" ] && \
-   "$PY" -c "import httpx, bs4, lxml" >/dev/null 2>&1; then
+# O script so precisa de httpx/bs4 (lxml e opcional), que o venv-web tem —
+# entao o container virou fallback. Pula o modo nativo com WEBGET_CONTAINER=1.
+if [ "${WEBGET_CONTAINER:-0}" != "1" ] && [ -n "$PY" ]; then
     exec "$PY" "$FONTE/webget.py" "$@"
 fi
 

@@ -122,7 +122,7 @@ measured against these five defects.
                        v                          v
    LAYER 2: daemon (Docker API)           LAYER 1: direct mode
    static official CLI (arm64)            udocker + proot 5.1 on the fly
-   <-> udockerd 0.3.5 (tcp 127.0.0.1:2375)  no build/exec/logs
+   <-> udockerd 0.3.5 (unix socket 0600)  no build/exec/logs
    -> real execution: Termux proot 5.1
 ```
 
@@ -157,12 +157,27 @@ git clone https://github.com/Padilha-BR/docker-termux
 cd docker-termux
 bash docker-termux-setup          # idempotent; --force redoes downloads
 docker doctor                     # checks every piece
-bash verificar.sh                 # proves the whole stack (16 items, ~1 min)
+bash verificar.sh                 # proves the whole stack (17 items, ~2 min)
 ```
 
 The installer handles: `proot`, `qemu-user-x86-64`, the udocker runtime, the proot shim,
 the qemu patch, the udockerd venv, supervisor compilation, the official CLI download,
-scripts, shortcuts and `resolv.conf`.
+scripts, shortcuts, the `venv-web` (Selenium/`websockets`/httpx for the web commands) and
+`resolv.conf`.
+
+**Where things go.** The repo was born inside the Hermes agent and the defaults show it —
+but nothing requires Hermes to be installed:
+
+| variable | default | what it changes |
+|---|---|---|
+| `DOCKER_TERMUX_BIN` | `~/.hermes/bin` | where the commands go (`docker`, `udocker`, `pdf`, `web*`...); put it on `PATH` |
+| `DOCKER_TERMUX_HOME` | `~/docker-termux` | udocker runtime, image sources, venvs, logs, state |
+| `DOCKER_TERMUX_DNS` | `8.8.8.8,8.8.4.4` | nameservers written to the containers' `resolv.conf` (VPN/private DNS) |
+| `UDOCKER_VERSAO` | `1.3.17` | udocker version; the installer records the chosen one and the direct engine reads it |
+
+Only optional bits remain from Hermes: `pdfpy` looks for the `pdf` skill helpers in
+`~/.hermes/skills/productivity/pdf/scripts` (`PDF_SKILL_DIR` points elsewhere), and
+`webget`/`webcdp` accept the `~/hermes-agent` venv when `venv-web` is missing.
 
 Two things worth knowing about those downloads:
 
@@ -172,7 +187,7 @@ Two things worth knowing about those downloads:
   its hash, never silently accepted). `udockerd` is installed pinned at `==0.3.5`, the
   version the dispatcher's workarounds were tested against.
 - **The daemon listens on a Unix socket**, not TCP — see "Why the daemon listens on a Unix
-  socket" below.
+  socket" above.
 
 ---
 
@@ -190,7 +205,7 @@ docker exec web cat /etc/alpine-release
 docker stop web && docker rm web
 
 printf 'FROM alpine:3.20\nRUN apk add --no-cache jq\nCMD ["jq","--version"]\n' > Dockerfile
-docker build -t minha-imagem .           # a real build, no daemon
+docker build -t minha-imagem .           # a real build (needs the daemon)
 docker run --rm minha-imagem
 
 docker doctor        # diagnostics
@@ -282,7 +297,7 @@ the same with the ART path).
 ## Verification (reproduce it)
 
 ```sh
-bash verificar.sh          # the whole stack, 16 items
+bash verificar.sh          # the whole stack, 17 items
 ```
 
 or individually:
@@ -324,11 +339,12 @@ It also **bridges the two interfaces**: `docker` accepts the udocker-native comm
 
 ## Binds and browser: two measured findings
 
-**1. `-v` does not accept `:ro`.** `-v /host/script.py:/ctr/script.py:ro` mounts nothing
-and still creates a file named `script.py:ro` inside the destination — the container then
-fails with `can't open file '/ctr/script.py'`. Use the plain form `-v source:dest` (works
-for a file and for a directory). Proof the bind took: the `sha256sum` inside and outside
-must match.
+**1. udocker has no `:ro`.** Passed raw, `-v /host/script.py:/ctr/script.py:ro` mounts
+nothing and still creates a file named `script.py:ro` inside the destination — the container
+then fails with `can't open file '/ctr/script.py'`. The direct engine now **strips the
+suffix and warns** (`:rw` too; `--mount ...,readonly` likewise): the bind goes in, but
+**writable** — don't count on read-only. Proof the bind took: the `sha256sum` inside and
+outside must match.
 
 **2. No Chromium survives `proot`** — and the cure is not to use a container for this.
 Measured with Chrome for Testing 156 and `chrome-headless-shell` 156 (native arm64):
@@ -387,7 +403,14 @@ plain HTTP when the HTML already carries the content, and never run two browsers
   That is why the dispatcher injects `-t` into `run -d` and warns. The supervisor
   (`~/.udockerd/udockerd-supervisor-*`, compiled by the installer) is also needed to avoid
   orphan processes.
-- `docker run` without `--rm` accumulates stopped containers (same as real Docker).
+- `docker run` without `--rm` accumulates stopped containers (same as real Docker). With
+  `--rm`, the direct engine removes the container even on Ctrl-C/`SIGTERM`; for `-d --rm`,
+  removal happens on `docker stop` or on the next `docker ps`.
+- Direct-engine (`docker-direct`) differences that may catch an old script: `run --name`
+  with a name that already exists exits **125** (it used to reuse it silently; reuse without
+  `--name` is now by **exact** name only); an unknown flag exits **2** instead of being
+  ignored; `rm` of a running container needs `-f`; a `--platform` different from the local
+  tag's architecture pulls again.
 - **`proot` charges per entry of the mounted directory:** a container with no bind is 4 s,
   with an empty directory 7 s, with `$HOME` (728 entries) **13 s**. That is why `webget` runs
   natively first.
@@ -418,7 +441,7 @@ to fixes — everything executed inside the device, in a terminal.
 | `scripts/` | the `docker` dispatcher, the direct engine, the daemon lifecycle, `udockerd-unix` (Unix-socket daemon) and the installer |
 | `checksums.txt` | pinned sha256 of the artifacts the installer downloads |
 | `ferramentas/` | `pdf`, `pdfpy`, `webget`, `webprint`, `webcdp`, `webplay` and the `webauto.py` helper |
-| `imagens/` | Dockerfiles **and the original sources** (`md2pdf`, `webget.py`, `webprint.py`) |
+| `imagens/` | Dockerfiles **and the original sources** (`md2pdf`, `webget.py`) |
 | `testes/` | headless benchmarks (time + RAM) and the PDF test battery |
 | `examples/` | worked examples: Manim (video) and web automation (Selenium) |
 | `skills/` | the Hermes skill describing the procedure |

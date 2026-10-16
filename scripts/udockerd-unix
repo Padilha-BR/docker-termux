@@ -16,7 +16,8 @@ o mesmo truque, com o MESMO handler e as MESMAS rotas dele: muda so o transporte
 Uso:
     udockerd-unix                          # ~/.udockerd/docker.sock, modo 0600
     udockerd-unix --socket /caminho.sock
-    udockerd-unix --porta-legado 2375      # tambem aceita TCP (nao recomendado)
+    (TCP nao e aqui: DOCKER_DAEMON_TCP=1 no docker-daemon-up sobe o udockerd
+     antigo em 127.0.0.1:2375 — nao recomendado)
 
     docker -H unix://$HOME/.udockerd/docker.sock ps
     export DOCKER_HOST=unix://$HOME/.udockerd/docker.sock
@@ -131,7 +132,13 @@ def main() -> int:
         os.unlink(caminho)
 
     handler_cls = make_handler_class(build_router())
-    httpd = ThreadingUnixHTTPServer(caminho, handler_cls)
+    # umask 0177 durante o bind: o socket ja NASCE 0600. So o chmod depois
+    # deixava uma janela em que ele existia com o modo do umask do Termux.
+    umask_antes = os.umask(0o177)
+    try:
+        httpd = ThreadingUnixHTTPServer(caminho, handler_cls)
+    finally:
+        os.umask(umask_antes)
     # 0600: so o dono do Termux fala com a API. E isto que o TCP nao consegue dar.
     os.chmod(caminho, 0o600)
 

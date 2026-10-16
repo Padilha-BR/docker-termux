@@ -121,7 +121,7 @@ documentar as armadilhas com medições reproduzíveis.
                        v                          v
    CAMADA 2: daemon (API do Docker)        CAMADA 1: modo direto
    CLI oficial estatica (arm64)            udocker + proot 5.1 na hora
-   <-> udockerd 0.3.5 (tcp 127.0.0.1:2375) sem build/exec/logs
+   <-> udockerd 0.3.5 (socket unix 0600)   sem build/exec/logs
    -> execucao real: proot 5.1 do Termux
 ```
 
@@ -161,7 +161,22 @@ docker doctor                     # confere cada peça
 
 O instalador cuida de: `proot`, `qemu-user-x86-64`, runtime udocker, shim do
 proot, patch do qemu, venv do udockerd, compilação do supervisor, download da CLI
-oficial, scripts, atalhos e `resolv.conf`.
+oficial, scripts, atalhos, o `venv-web` (Selenium/`websockets`/httpx dos
+comandos web) e `resolv.conf`.
+
+**Onde as coisas ficam.** O repo nasceu dentro do agente Hermes, e os padrões
+refletem isso — mas nada exige o Hermes instalado:
+
+| variável | padrão | o que muda |
+|---|---|---|
+| `DOCKER_TERMUX_BIN` | `~/.hermes/bin` | onde entram os comandos (`docker`, `udocker`, `pdf`, `web*`...); ponha no `PATH` |
+| `DOCKER_TERMUX_HOME` | `~/docker-termux` | runtime do udocker, fontes das imagens, venvs, logs, estado |
+| `DOCKER_TERMUX_DNS` | `8.8.8.8,8.8.4.4` | nameservers gravados no `resolv.conf` dos containers (VPN/DNS privado) |
+| `UDOCKER_VERSAO` | `1.3.17` | versão do udocker; o instalador grava a escolhida e o motor direto lê a mesma |
+
+Do Hermes, só sobra o opcional: o `pdfpy` procura os helpers da skill `pdf` em
+`~/.hermes/skills/productivity/pdf/scripts` (`PDF_SKILL_DIR` aponta outro lugar), e
+`webget`/`webcdp` aceitam o venv do `~/hermes-agent` se o `venv-web` não existir.
 
 Duas coisas importantes sobre esses downloads:
 
@@ -171,7 +186,7 @@ Duas coisas importantes sobre esses downloads:
   aceita em silêncio). O `udockerd` é instalado pinado em `==0.3.5`, a versão contra a qual
   os contornos do dispatcher foram testados.
 - **O daemon escuta num socket Unix**, não em TCP — veja "Por que o daemon escuta num
-  socket Unix" abaixo.
+  socket Unix" acima.
 
 ---
 
@@ -189,7 +204,7 @@ docker exec web cat /etc/alpine-release
 docker stop web && docker rm web
 
 printf 'FROM alpine:3.20\nRUN apk add --no-cache jq\nCMD ["jq","--version"]\n' > Dockerfile
-docker build -t minha-imagem .           # build de verdade, sem daemon
+docker build -t minha-imagem .           # build de verdade (exige o daemon)
 docker run --rm minha-imagem
 
 docker doctor        # diagnóstico
@@ -314,11 +329,12 @@ tratadas automaticamente pelo comando `docker`:
 
 ## Binds e navegador: dois achados medidos
 
-**1. `-v` não aceita `:ro`.** `-v /host/script.py:/ctr/script.py:ro` não monta nada
-e ainda cria um arquivo chamado `script.py:ro` dentro do destino — o container
-falha com `can't open file '/ctr/script.py'`. Use a forma pura `-v origem:destino`
-(vale para arquivo e para diretório). Prova de que o bind pegou: `sha256sum` do
-arquivo dentro e fora devem bater.
+**1. O udocker não tem `:ro`.** Passado cru, `-v /host/script.py:/ctr/script.py:ro`
+não monta nada e ainda cria um arquivo chamado `script.py:ro` dentro do destino — o
+container falha com `can't open file '/ctr/script.py'`. O motor direto agora **remove
+o sufixo e avisa** (`:rw` também sai; `--mount ...,readonly` idem): o bind entra, mas
+**gravável** — não conte com somente-leitura. Prova de que o bind pegou: `sha256sum`
+do arquivo dentro e fora devem bater.
 
 **2. Nenhum Chromium sobrevive ao `proot`** — e a cura é não usar container para
 isso. Medido com Chrome for Testing 156 e `chrome-headless-shell` 156 (arm64
@@ -381,7 +397,14 @@ quando o HTML já traz o conteúdo, e nunca rode dois Chromiums em paralelo.
   Por isso o dispatcher insere `-t` em `run -d` e avisa. O supervisor
   (`~/.udockerd/udockerd-supervisor-*`, compilado pelo instalador) também é
   necessário para não deixar processos órfãos.
-- `docker run` sem `--rm` acumula containers parados (igual ao Docker real).
+- `docker run` sem `--rm` acumula containers parados (igual ao Docker real). Com
+  `--rm`, o motor direto remove o container mesmo com Ctrl-C/`SIGTERM`; num
+  `-d --rm`, a remoção acontece no `docker stop` ou no próximo `docker ps`.
+- Diferenças do motor direto (`docker-direct`) que podem pegar script antigo:
+  `run --name` de um nome que já existe sai com **125** (antes reaproveitava em
+  silêncio; o reaproveitamento sem `--name` agora é só por nome **exato**); flag
+  desconhecida sai com **2** em vez de ser ignorada; `rm` de container rodando
+  exige `-f`; `--platform` diferente da arquitetura da tag local puxa de novo.
 - O Android suspende processos em segundo plano: para serviços longos, garanta a
   bateria sem restrições para o Termux e mantenha wake-lock.
 - Uma arquitetura por tag: `pull --platform=linux/amd64 alpine:latest` substitui
@@ -409,7 +432,7 @@ trabalho de campo às correções — tudo executado dentro do aparelho, por ter
 | `scripts/` | o dispatcher `docker`, o motor direto, o ciclo do daemon, o `udockerd-unix` (daemon em socket Unix) e o instalador |
 | `checksums.txt` | sha256 pinado dos artefatos que o instalador baixa |
 | `ferramentas/` | `pdf`, `pdfpy`, `webget`, `webprint`, `webcdp`, `webplay` e o helper `webauto.py` |
-| `imagens/` | Dockerfiles **e as fontes autorais** (`md2pdf`, `webget.py`, `webprint.py`) |
+| `imagens/` | Dockerfiles **e as fontes autorais** (`md2pdf`, `webget.py`) |
 | `testes/` | benchmarks de headless (tempo + RAM) e a bateria de testes do PDF |
 | `examples/` | exemplos rodando: Manim (vídeo) e automação web (Selenium) |
 | `skills/` | a skill do Hermes que descreve o procedimento |

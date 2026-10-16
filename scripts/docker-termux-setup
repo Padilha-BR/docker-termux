@@ -10,6 +10,21 @@
 #     oficial estatica do Docker. Habilita `docker build`, `exec`, `logs`,
 #     TTY e qualquer cliente de API (CLI oficial, docker-py).
 #
+#   FERRAMENTAS             pdf, pdfpy, webget, webprint, webcdp, webplay (e o
+#     helper webauto.py), as fontes das imagens e um venv proprio
+#     (venv-web: selenium, websockets, httpx, bs4, html2text, versoes
+#     pinadas em PACOTES_WEB) — nao depende do Hermes.
+#
+# Variaveis de ambiente (padroes entre parenteses; os de pasta sao os do Hermes):
+#   DOCKER_TERMUX_HOME  runtime, imagens, venvs, logs, state   (~/docker-termux)
+#   DOCKER_TERMUX_BIN   comandos docker, udocker, pdf, web*... (~/.hermes/bin)
+#   UDOCKER_VERSAO      runtime udocker; gravada em $BASE/udocker-versao, que o
+#                       docker-direct e a ponte udocker leem   (1.3.17)
+#   DOCKER_CLI_VERSAO   CLI oficial estatica (hash em checksums.txt)
+#   UDOCKERD_VERSAO     udockerd do pip                        (0.3.5)
+#   DOCKER_TERMUX_DNS   nao e lida aqui: o passo de DNS chama `docker-direct
+#                       dns-fix`, que a le                      (8.8.8.8,8.8.4.4)
+#
 # Idempotente: pode rodar quantas vezes quiser; cada passo verifica antes de
 # agir. --force refaz os downloads e a compilacao.
 #
@@ -29,11 +44,14 @@ VERSAO_DOCKER_CLI="${DOCKER_CLI_VERSAO:-29.9.1}"
 # pode mudar entre a documentacao e a execucao. O dispatcher foi testado contra
 # esta versao (o `docker pull`/`Binds`/`logs` contornam defeitos dela).
 VERSAO_UDOCKERD="${UDOCKERD_VERSAO:-0.3.5}"
-BASE="$HOME/docker-termux"
+BASE="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}"
 BIN="$BASE/udocker-$VERSAO_UDOCKER/udocker/udocker"
 REPO="$HOME/.udocker"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
-MEUBIN="$HOME/.hermes/bin"
+MEUBIN="${DOCKER_TERMUX_BIN:-$HOME/.hermes/bin}"
+# venv-web: versoes pinadas (conferidas no PyPI em 16/10/2026). Python puro —
+# o lxml fica opcional (o webget cai no html.parser sem ele).
+PACOTES_WEB="selenium==4.51.0 websockets==17.2 httpx==0.28.1 beautifulsoup4==4.15.0 html2text==2025.4.15"
 AQUI="$(cd "$(dirname "$0")" && pwd)"
 
 # Onde estao os scripts e o checksums.txt? Este instalador roda de tres lugares:
@@ -94,7 +112,7 @@ conferir_hash() {
 }
 
 # ------------------------------------------------------------- 1. dependencias
-passo "1/8 dependencias"
+passo "1/9 dependencias"
 faltando=()
 for p in proot curl tar gzip xz-utils python; do
     dpkg -s "$p" >/dev/null 2>&1 || faltando+=("$p")
@@ -112,12 +130,13 @@ fi
 command -v proot >/dev/null 2>&1 || { vermelho "proot ausente — impossivel continuar"; exit 1; }
 
 # --------------------------------------------------------------- 2. udocker
-passo "2/8 runtime udocker $VERSAO_UDOCKER (modo direto)"
+passo "2/9 runtime udocker $VERSAO_UDOCKER (modo direto)"
 mkdir -p "$BASE" "$BASE/logs" "$BASE/state" "$MEUBIN"
 if [ ! -x "$BIN" ] || [ "$FORCE" = 1 ]; then
     TMPD="${TMPDIR:-$PREFIX/tmp}"; cd "$TMPD" || exit 1
     if [ ! -d "$TMPD/udocker-$VERSAO_UDOCKER" ] || [ "$FORCE" = 1 ]; then
-        curl -sL -o "udocker-$VERSAO_UDOCKER.tar.gz" \
+        # -f: um 404 vira erro aqui, e nao uma pagina HTML entregue ao tar
+        curl -fsSL -o "udocker-$VERSAO_UDOCKER.tar.gz" \
             "https://github.com/indigo-dc/udocker/releases/download/$VERSAO_UDOCKER/udocker-$VERSAO_UDOCKER.tar.gz" \
             || { vermelho "download do udocker falhou"; exit 1; }
         conferir_hash "udocker-$VERSAO_UDOCKER.tar.gz" "$TMPD/udocker-$VERSAO_UDOCKER.tar.gz" "udocker"
@@ -126,16 +145,30 @@ if [ ! -x "$BIN" ] || [ "$FORCE" = 1 ]; then
     rm -rf "$BASE/udocker-$VERSAO_UDOCKER"
     cp -a "$TMPD/udocker-$VERSAO_UDOCKER" "$BASE/"
     chmod +x "$BIN"
+    # O tarball oficial do udocker tem shebang `#!/usr/bin/env python`, e no
+    # Android NAO existe /usr/bin/env. Ate o Android 16 o termux-exec reescrevia
+    # esse shebang; no Android 17 ele deixou de reescrever, e executar o binario
+    # direto morre com "bad interpreter: No such file or directory". Isso derruba
+    # o modo direto inteiro (run -v, pull, rm) e ate o `$BIN install` num aparelho
+    # limpo. Aponta para o caminho real do Termux (idempotente).
+    MAINCMD="$BASE/udocker-$VERSAO_UDOCKER/udocker/maincmd.py"
+    if [ -f "$MAINCMD" ] && head -1 "$MAINCMD" | grep -q '^#!/usr/bin/env'; then
+        sed -i "1s|.*|#!$PREFIX/bin/env python|" "$MAINCMD"
+        verde "  shebang do udocker apontado para o Termux"
+    fi
 else
     echo "  ja instalado: $BIN"
 fi
+# UMA fonte da versao: o docker-direct e o dispatcher leem este arquivo
+# (antes o motor tinha 1.3.17 fixo e divergia de UDOCKER_VERSAO)
+printf '%s\n' "$VERSAO_UDOCKER" > "$BASE/udocker-versao"
 [ -d "$REPO/bin" ] || {
     echo "  baixando binarios do engine..."
     PROOT_NO_SECCOMP=1 TMPDIR="${TMPDIR:-$PREFIX/tmp}" "$BIN" install >/dev/null 2>&1
 }
 
 # ------------------------------------------------------------- 3. shim proot
-passo "3/8 shim do proot (proot 5.1 do Termux + --link2symlink)"
+passo "3/9 shim do proot (proot 5.1 do Termux + --link2symlink)"
 SHIM="$REPO/bin/proot-arm64-4_8_0"
 if [ ! -f "$SHIM" ]; then
     vermelho "  $SHIM ausente — rode: $BIN install"; falhou=1
@@ -154,7 +187,7 @@ SHIMEOF
 fi
 
 # -------------------------------------------------------------- 4. patch qemu
-passo "4/8 patch do qemu (caminho absoluto)"
+passo "4/9 patch do qemu (caminho absoluto)"
 ARQ_PY="$BASE/udocker-$VERSAO_UDOCKER/udocker/engine/proot.py"
 if grep -q "PATCH ANDROID" "$ARQ_PY" 2>/dev/null; then
     echo "  ja aplicado"
@@ -173,9 +206,12 @@ if velho in s:
     open(p, "w", encoding="utf-8").write(s.replace(velho, novo, 1))
     print("  patch aplicado")
 else:
-    print("  AVISO: trecho nao encontrado (versao diferente do udocker?)")
+    print("  ERRO: trecho nao encontrado (versao diferente do udocker?)")
+    sys.exit(1)
 PYEOF
-    [ $? -eq 0 ] && verde "  patch qemu ok"
+    # antes o "ok" saia mesmo sem achar o trecho: imagem amd64 quebrava depois
+    if [ $? -eq 0 ]; then verde "  patch qemu ok"
+    else vermelho "  patch qemu NAO aplicado — imagens amd64 vao falhar"; falhou=1; fi
 fi
 if command -v qemu-x86_64 >/dev/null 2>&1; then
     ln -sf "$(command -v qemu-x86_64)" "$REPO/bin/qemu-x86_64" 2>/dev/null
@@ -183,7 +219,7 @@ if command -v qemu-x86_64 >/dev/null 2>&1; then
 fi
 
 # --------------------------------------------------------- 5. daemon udockerd
-passo "5/8 daemon: udockerd (API do Docker) em venv isolado"
+passo "5/9 daemon: udockerd (API do Docker) em venv isolado"
 VENV="$BASE/venv-udockerd"
 if [ ! -x "$VENV/bin/udockerd" ] || [ "$FORCE" = 1 ]; then
     python3 -m venv --system-site-packages "$VENV" 2>/dev/null
@@ -199,7 +235,7 @@ else
 fi
 
 # ---------------------------------------------- 6. supervisor + CLI oficial
-passo "6/8 supervisor do daemon + CLI oficial do Docker"
+passo "6/9 supervisor do daemon + CLI oficial do Docker"
 if [ -x "$VENV/bin/python" ]; then
     "$VENV/bin/python" -c "
 from udockerd.supervisor import ensure_supervisor
@@ -225,10 +261,15 @@ if velho in s:
     open(p, "w", encoding="utf-8").write(s.replace(velho, novo, 1))
     print("  patch do qemu aplicado na lib do daemon")
 else:
-    print("  AVISO: lib do daemon sem o trecho esperado")
+    print("  ERRO: lib do daemon sem o trecho esperado")
+    sys.exit(1)
 PYEOF
-        verde "  lib do daemon ajustada"
-        ( bash "$HOME/.hermes/bin/docker-daemon-down" >/dev/null 2>&1 || true )
+        if [ $? -eq 0 ]; then
+            verde "  lib do daemon ajustada"
+            ( bash "$MEUBIN/docker-daemon-down" >/dev/null 2>&1 || true )
+        else
+            vermelho "  lib do daemon NAO ajustada — amd64 pelo daemon vai falhar"; falhou=1
+        fi
     fi
 fi
 
@@ -246,70 +287,106 @@ if [ ! -x "$CLI" ] || [ "$FORCE" = 1 ]; then
         cp docker/docker "$CLI"; chmod +x "$CLI"; rm -rf docker "$arquivo"
         verde "  CLI instalada: $("$CLI" --version)"
     else
-        ultima=$(curl -s https://download.docker.com/linux/static/stable/aarch64/ \
-                 | grep -oE 'docker-[0-9]+\.[0-9]+\.[0-9]+\.tgz' | sort -uV | tail -1)
-        if [ -n "$ultima" ] && curl -sfL -o "$ultima" \
-            "https://download.docker.com/linux/static/stable/aarch64/$ultima" \
-            && tar xzf "$ultima" docker/docker 2>/dev/null; then
-            # versao fora do pin: avisa e mostra o hash (nao aborta)
-            conferir_hash "docker-cli-${ultima#docker-}" "docker/docker" "CLI do Docker ($ultima)"
-            cp docker/docker "$CLI"; chmod +x "$CLI"; rm -rf docker "$ultima"
-            verde "  CLI instalada (fallback): $("$CLI" --version)"
-        else
-            amarelo "  CLI oficial indisponivel: so o modo direto vai funcionar"
-        fi
+        # Sem fallback "a ultima versao" raspada da listagem do servidor: ela
+        # nunca tem pin, e instalar binario nao conferido em silencio e o que
+        # o checksums.txt existe para impedir. Outra versao = escolha explicita.
+        amarelo "  CLI $VERSAO_DOCKER_CLI indisponivel: so o modo direto vai funcionar"
+        amarelo "  outra versao: DOCKER_CLI_VERSAO=x.y.z bash docker-termux-setup"
+        amarelo "  (sem pin no checksums.txt ela e instalada com aviso e o hash impresso)"
+        rm -rf docker "$arquivo"
+        falhou=1
     fi
 else
     echo "  ja instalada: $("$CLI" --version 2>/dev/null)"
 fi
 
 # -------------------------------------------------------------- 7. os scripts
-passo "7/8 scripts do CLI em $MEUBIN"
-for s in docker docker-direct docker-daemon-up docker-daemon-down udockerd-unix; do
-    if [ -f "$SCRIPTS/$s" ]; then
-        cp "$SCRIPTS/$s" "$MEUBIN/$s"; chmod +x "$MEUBIN/$s"; echo "  $s"
-    elif [ -x "$MEUBIN/$s" ]; then
+passo "7/9 comandos em $MEUBIN e fontes das imagens em $BASE/imagens"
+# Antes so os 4-5 scripts do motor eram copiados: pdf/webget/webcdp/webplay,
+# o `udocker` ponte e as imagens ficavam de fora, e quem nao clonava em
+# ~/docker-termux ficava com as ferramentas quebradas.
+FERRAMENTAS="$RAIZ/ferramentas"
+for s in docker docker-direct docker-daemon-up docker-daemon-down udockerd-unix udocker \
+         pdf pdfpy webget webprint webcdp webcdp.py webplay webauto.py; do
+    origem="$SCRIPTS/$s"
+    [ -f "$origem" ] || origem="$FERRAMENTAS/$s"
+    if [ -f "$origem" ]; then
+        if [ "$(readlink -f "$origem")" != "$(readlink -f "$MEUBIN/$s" 2>/dev/null)" ]; then
+            cp "$origem" "$MEUBIN/$s"
+        fi
+        case "$s" in *.py) ;; *) chmod +x "$MEUBIN/$s" ;; esac
+        echo "  $s"
+    elif [ -e "$MEUBIN/$s" ]; then
         echo "  $s (ja presente)"
     else
-        amarelo "  $s AUSENTE — copie de scripts/ para $MEUBIN"
+        amarelo "  $s AUSENTE — rode o instalador a partir do clone do repositorio"
         falhou=1
     fi
 done
+if [ -d "$RAIZ/imagens" ]; then
+    if [ "$(readlink -f "$RAIZ/imagens")" != "$(readlink -f "$BASE/imagens" 2>/dev/null)" ]; then
+        rm -rf "$BASE/imagens.novo"
+        cp -a "$RAIZ/imagens" "$BASE/imagens.novo" \
+            && rm -rf "$BASE/imagens" && mv "$BASE/imagens.novo" "$BASE/imagens"
+    fi
+    echo "  imagens/ -> $BASE/imagens"
+else
+    amarelo "  imagens/ ausente no repositorio: pdf/pdfpy/webget (modo container) nao constroem"
+fi
 case ":$PATH:" in
     *":$MEUBIN:"*) ;;
-    *) amarelo "  adicione ao ~/.bashrc: export PATH=\$HOME/.hermes/bin:\$PATH" ;;
+    *) amarelo "  adicione ao ~/.bashrc: export PATH=$MEUBIN:\$PATH" ;;
 esac
 
+# ------------------------------------------------------------ 8. venv-web
+passo "8/9 venv-web (selenium/websockets/httpx/bs4) para webget, webcdp e webplay"
+VENV_WEB="$BASE/venv-web"
+if [ ! -x "$VENV_WEB/bin/python" ] || [ "$FORCE" = 1 ]; then
+    # --system-site-packages: aproveita o lxml do `pkg` se existir
+    python3 -m venv --system-site-packages "$VENV_WEB" 2>/dev/null
+fi
+read -r -a pacotes_web <<< "$PACOTES_WEB"
+if [ "$FORCE" = 0 ] && "$VENV_WEB/bin/python" -c "import selenium, websockets, httpx, bs4" 2>/dev/null; then
+    echo "  ja instalado: $VENV_WEB"
+elif "$VENV_WEB/bin/pip" install -q "${pacotes_web[@]}" 2>&1 | tail -2; then
+    verde "  venv-web pronto ($PACOTES_WEB)"
+else
+    amarelo "  venv-web incompleto: webcdp/webplay pedem o pacote que faltar"
+    falhou=1
+fi
+
 # --------------------------------------------------------------- 8. atalhos
-passo "8/8 atalhos de toque (Termux:Widget) e DNS"
+passo "9/9 atalhos de toque (Termux:Widget) e DNS"
 mkdir -p "$HOME/.shortcuts"
-cat > "$HOME/.shortcuts/Docker status.sh" <<'EOF'
+cat > "$HOME/.shortcuts/Docker status.sh" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
-export PATH=$HOME/.hermes/bin:$PATH
+export PATH=$MEUBIN:\$PATH
 clear; docker doctor; echo; docker ps -a; echo; docker images
 read -r -p "Enter para fechar..."
 EOF
-cat > "$HOME/.shortcuts/Docker shell.sh" <<'EOF'
+cat > "$HOME/.shortcuts/Docker shell.sh" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
-export PATH=$HOME/.hermes/bin:$PATH
+export PATH=$MEUBIN:\$PATH
 clear
 echo "Shell dentro de um container Alpine. Digite exit para sair."
 docker run -it --rm alpine:3.20 sh
 EOF
-cat > "$HOME/.shortcuts/Docker ajuda.sh" <<'EOF'
+cat > "$HOME/.shortcuts/Docker ajuda.sh" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
-export PATH=$HOME/.hermes/bin:$PATH
+export PATH=$MEUBIN:\$PATH
 clear; docker help; echo; echo "Dicas: docker doctor | docker ps -a | docker images"
 read -r -p "Enter para fechar..."
 EOF
 chmod +x "$HOME/.shortcuts/Docker"*.sh && echo "  atalhos prontos"
 
-n=0
-for c in "$REPO"/containers/*/; do
-    [ -d "$c/ROOT/etc" ] || continue
-    printf 'nameserver 8.8.8.8\nnameserver 8.8.4.4\n' > "$c/ROOT/etc/resolv.conf" 2>/dev/null && n=$((n+1))
-done
-echo "  resolv.conf (modo direto) em $n container(s)"
+# resolv.conf pelo MESMO codigo do motor direto (realpath/commonpath, troca
+# de symlink, O_NOFOLLOW e DOCKER_TERMUX_DNS). O `printf > ROOT/etc/...` que
+# havia aqui seguia symlink: uma imagem maliciosa sobrescrevia arquivo do host.
+if [ -x "$MEUBIN/docker-direct" ]; then
+    "$MEUBIN/docker-direct" dns-fix | sed 's/^/  /'
+else
+    amarelo "  docker-direct ausente: resolv.conf nao aplicado (rode: docker dns-fix)"
+fi
 
 # ------------------------------------------------------------------- resumo
 if command -v docker >/dev/null 2>&1; then
@@ -318,7 +395,7 @@ if command -v docker >/dev/null 2>&1; then
     passo "teste real"
     docker run --rm alpine sh -c "echo 'docker rodando:' \$(uname -m)" 2>&1 | tail -2
 else
-    amarelo "export PATH=\$HOME/.hermes/bin:\$PATH  e rode: docker doctor"
+    amarelo "export PATH=$MEUBIN:\$PATH  e rode: docker doctor"
 fi
 
 echo

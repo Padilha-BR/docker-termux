@@ -11,7 +11,9 @@
 # Saída: 0 se tudo passou, 1 se algum item falhou (imprime o resumo no fim).
 
 set -uo pipefail
-export PATH="$HOME/.hermes/bin:$PATH"
+export PATH="${DOCKER_TERMUX_BIN:-$HOME/.hermes/bin}:$PATH"
+BASE_DT="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}"
+AQUI="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 TMPDIR="${TMPDIR:-$PREFIX/tmp}"    # set -u derruba o script se TMPDIR vier ausente
 RAPIDO="${1:-}"
@@ -134,7 +136,7 @@ case "$saida" in *"React"*) ok "webprint renderiza SPA (JS)" "$((t1-t0))s" ;;
 
 echo
 echo "--- 4. headless: nivel 3 (CDP puro, sem selenium) ------------"
-if [ -x "$HOME/.hermes/bin/webcdp" ]; then
+if command -v webcdp >/dev/null 2>&1; then
     t0=$(date +%s)
     titulo=$(timeout 120 webcdp https://example.com --titulo 2>&1 | head -1)
     t1=$(date +%s)
@@ -154,11 +156,21 @@ fi
 
 echo
 echo "--- 5. headless: nivel 3b (selenium, alternativa) ------------"
-if [ -x "$HOME/docker-termux/venv-web/bin/python" ] && \
-   [ -x "$PREFIX/bin/chromedriver" ]; then
-    ok "selenium + chromedriver presentes" \
-       "($(cd "$HOME/testes-pdf" 2>/dev/null && timeout 120 \
-          "$HOME/docker-termux/venv-web/bin/python" teste-selenium.py 2>&1 | tail -1 | cut -c10-40))"
+# Antes: `ok` incondicional (o item passava mesmo com o selenium quebrado) e o
+# teste vinha de ~/testes-pdf, que nada no repo cria. Agora roda o exemplo do
+# proprio repo num diretorio temporario e so passa com o VEREDITO certo.
+SEL_DIR="$AQUI/examples/automacao-web"
+if [ -x "$BASE_DT/venv-web/bin/python" ] && [ -x "$PREFIX/bin/chromedriver" ] \
+   && [ -f "$SEL_DIR/teste-selenium.py" ]; then
+    vfy_sel="$(mktemp -d "$TMPDIR/vfy-sel-XXXXXX")"
+    saida=$(cd "$vfy_sel" && timeout 120 "$BASE_DT/venv-web/bin/python" \
+        "$SEL_DIR/teste-selenium.py" "$SEL_DIR/interacao.html" 2>&1)
+    rm -rf "$vfy_sel"
+    if echo "$saida" | grep -q "VEREDITO: AUTOMACAO FUNCIONANDO"; then
+        ok "selenium + chromedriver (clique real)"
+    else
+        falha "selenium" "$(echo "$saida" | tail -1 | cut -c1-40)"
+    fi
 else
     pulou "selenium" "venv-web ou chromedriver ausente"
 fi
