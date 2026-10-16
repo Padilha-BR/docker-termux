@@ -13,21 +13,24 @@
 #
 # Saída: 0 ok | 2 erro de uso/ambiente | 3 carregou mas sem conteúdo.
 #
-# Precisa do python do Hermes (o `websockets` está lá; o python3 do sistema
-# não tem) e do Chromium nativo — este wrapper garante os dois antes de rodar.
+# Precisa de um python com `websockets` (o venv-web do docker-termux-setup; o do
+# Hermes continua aceito) e do Chromium nativo — este wrapper garante os dois.
 set -uo pipefail
 
-PY="$HOME/hermes-agent/venv/bin/python"
-SCRIPT="$HOME/.hermes/bin/webcdp.py"
+BASE="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}"
+SCRIPT="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/webcdp.py"
 CHROME="${CHROMIUM_BIN:-chromium-browser}"
 
 erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
 
 [ -f "$SCRIPT" ] || erro "webcdp.py nao encontrado em $SCRIPT"
-[ -x "$PY" ] || erro "python do Hermes ausente em $PY"
+PY=""
+for candidato in "${WEBCDP_PY:-}" "$BASE/venv-web/bin/python" "$HOME/hermes-agent/venv/bin/python"; do
+    [ -n "$candidato" ] && [ -x "$candidato" ] || continue
+    if "$candidato" -c "import websockets" 2>/dev/null; then PY="$candidato"; break; fi
+done
+[ -n "$PY" ] || erro "nenhum python com 'websockets' (rode: docker-termux-setup)"
 command -v "$CHROME" >/dev/null 2>&1 || erro \
     "$CHROME nao encontrado — instale: pkg install x11-repo && pkg install chromium"
-"$PY" -c "import websockets" 2>/dev/null || erro \
-    "o python do Hermes nao tem 'websockets' (rode: $PY -m pip install websockets)"
 
 exec "$PY" "$SCRIPT" "$@"

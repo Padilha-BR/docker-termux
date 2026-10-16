@@ -16,7 +16,8 @@
 set -uo pipefail
 
 IMG="pdf-tool:1"
-FONTE_IMG="$HOME/docker-termux/imagens/pdf"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+FONTE_IMG="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}/imagens/pdf"
 TMP_HOST="${TMPDIR:-$PREFIX/tmp}"
 
 erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
@@ -72,11 +73,9 @@ if [ "$ENTRADA" = "-" ]; then
     LIMPAR_TMP=1
     cat >"$BASE/entrada.md" || { rm -rf "$BASE"; erro "falha lendo a entrada padrao"; }
     NOME_ENTRADA="entrada.md"
-    ORIGEM="$BASE"
 else
-    ORIGEM="$(cd "$(dirname "$ENTRADA")" && pwd)" || erro "nao consegui resolver o caminho de $ENTRADA"
+    BASE="$(cd "$(dirname "$ENTRADA")" && pwd)" || erro "nao consegui resolver o caminho de $ENTRADA"
     NOME_ENTRADA="$(basename "$ENTRADA")"
-    BASE="$ORIGEM"
 fi
 
 # destino final no celular
