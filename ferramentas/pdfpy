@@ -17,8 +17,8 @@
 set -uo pipefail
 
 IMG="pdf-tool:1"
-SKILL="$HOME/.hermes/skills/productivity/pdf/scripts"
-FONTE_IMG="$HOME/docker-termux/imagens/pdf"
+SKILL="${PDF_SKILL_DIR:-$HOME/.hermes/skills/productivity/pdf/scripts}"
+FONTE_IMG="${DOCKER_TERMUX_HOME:-$HOME/docker-termux}/imagens/pdf"
 
 erro() { printf 'erro: %s\n' "$*" >&2; exit 2; }
 
@@ -57,7 +57,7 @@ exec docker-direct run --rm \
     --entrypoint python3 \
     -v "$PWD:/dados" \
     -v "$SKILL:/skills/scripts" \
-    -v "$FONTE_IMG/md2pdf:/usr/local/bin/md2pdf:ro" \
+    -v "$FONTE_IMG/md2pdf:/usr/local/bin/md2pdf" \
     -w /dados \
     -e PYTHONUNBUFFERED=1 \
     "$IMG" "$DENTRO" "$@"
