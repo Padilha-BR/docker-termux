@@ -7,11 +7,15 @@ JavaScript, o texto sai vazio e o exit e 3 — nesse caso suba para `webprint`
 
 Uso:
     webget URL [--texto|--html|--links|--json] [-o ARQUIVO] [--seletor CSS]
-                [--timeout S] [--user-agent UA]
+                [--timeout S] [--user-agent UA] [--max-mb N]
+
+--json com -o grava o JSON no arquivo. O corpo baixado tem limite (--max-mb,
+padrao 20): uma URL que devolve gigabytes nao derruba o processo (nem o agente).
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -30,25 +34,40 @@ def main() -> int:
                     default="Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
                             "(KHTML, like Gecko) Chrome/120 Safari/537.36")
     ap.add_argument("-o", "--saida")
+    ap.add_argument("--max-mb", type=float, default=20.0,
+                    help="limite do corpo baixado, em MB (padrao 20)")
     args = ap.parse_args()
 
     import httpx
     from bs4 import BeautifulSoup
 
+    # lxml e mais rapido, mas opcional: sem ele, o parser da biblioteca padrao
+    parser = "lxml" if importlib.util.find_spec("lxml") else "html.parser"
+
+    limite = int(args.max_mb * 1024 * 1024)
     try:
-        r = httpx.get(args.url, timeout=args.timeout, follow_redirects=True,
-                      headers={"User-Agent": args.user_agent,
-                               "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8"})
+        with httpx.stream("GET", args.url, timeout=args.timeout,
+                          follow_redirects=True,
+                          headers={"User-Agent": args.user_agent,
+                                   "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8"}) as r:
+            if r.status_code >= 400:
+                print(f"webget: HTTP {r.status_code} em {args.url}", file=sys.stderr)
+                return 1
+            corpo = bytearray()
+            for pedaco in r.iter_bytes():
+                corpo += pedaco
+                if len(corpo) > limite:
+                    print(f"webget: corpo maior que {args.max_mb:g} MB — abortado "
+                          "(use --max-mb para aumentar)", file=sys.stderr)
+                    return 1
+            encoding = r.encoding or "utf-8"
+            url_final, status = str(r.url), r.status_code
     except Exception as e:
         print(f"webget: falha na requisicao: {e}", file=sys.stderr)
         return 1
 
-    if r.status_code >= 400:
-        print(f"webget: HTTP {r.status_code} em {args.url}", file=sys.stderr)
-        return 1
-
-    texto = r.text
-    soup = BeautifulSoup(texto, "lxml")
+    texto = bytes(corpo).decode(encoding, errors="replace")
+    soup = BeautifulSoup(texto, parser)
 
     def limpa(s: str) -> str:
         return "\n".join(l.strip() for l in s.splitlines() if l.strip())
@@ -59,7 +78,7 @@ def main() -> int:
             print(f"webget: seletor '{args.seletor}' nao encontrou nada",
                   file=sys.stderr)
             return 1
-        soup = BeautifulSoup("".join(str(x) for x in alvo), "lxml")
+        soup = BeautifulSoup("".join(str(x) for x in alvo), parser)
 
     if args.links:
         vistos, saida = set(), []
@@ -85,11 +104,16 @@ def main() -> int:
 
     if args.json:
         titulo = (soup.title.get_text(strip=True) if soup.title else "")
-        print(json.dumps({
-            "url": str(r.url), "status": r.status_code, "titulo": titulo,
+        dados = json.dumps({
+            "url": url_final, "status": status, "titulo": titulo,
             "bytes_html": len(texto), "chars_conteudo": len(conteudo),
             "vazio": not conteudo.strip(), "conteudo": conteudo,
-        }, ensure_ascii=False))
+        }, ensure_ascii=False)
+        if args.saida:          # antes o --json ignorava o -o
+            Path(args.saida).write_text(dados + "\n", encoding="utf-8")
+            print(f"{args.saida} ({len(dados)} chars, json)")
+        else:
+            print(dados)
     elif args.saida:
         Path(args.saida).write_text(conteudo, encoding="utf-8")
         print(f"{args.saida} ({len(conteudo)} chars)")
