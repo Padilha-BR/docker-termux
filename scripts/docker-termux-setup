@@ -145,6 +145,17 @@ if [ ! -x "$BIN" ] || [ "$FORCE" = 1 ]; then
     rm -rf "$BASE/udocker-$VERSAO_UDOCKER"
     cp -a "$TMPD/udocker-$VERSAO_UDOCKER" "$BASE/"
     chmod +x "$BIN"
+    # O tarball oficial do udocker tem shebang `#!/usr/bin/env python`, e no
+    # Android NAO existe /usr/bin/env. Ate o Android 16 o termux-exec reescrevia
+    # esse shebang; no Android 17 ele deixou de reescrever, e executar o binario
+    # direto morre com "bad interpreter: No such file or directory". Isso derruba
+    # o modo direto inteiro (run -v, pull, rm) e ate o `$BIN install` num aparelho
+    # limpo. Aponta para o caminho real do Termux (idempotente).
+    MAINCMD="$BASE/udocker-$VERSAO_UDOCKER/udocker/maincmd.py"
+    if [ -f "$MAINCMD" ] && head -1 "$MAINCMD" | grep -q '^#!/usr/bin/env'; then
+        sed -i "1s|.*|#!$PREFIX/bin/env python|" "$MAINCMD"
+        verde "  shebang do udocker apontado para o Termux"
+    fi
 else
     echo "  ja instalado: $BIN"
 fi
