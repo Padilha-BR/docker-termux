@@ -243,11 +243,13 @@ m.gravar_state("uuidB", {"pid": 4242, "starttime": "111", "log": logf})
 m.starttime = lambda pid: "999"              # PID reciclado: assinatura trocada
 SINAIS.clear()
 rc, _, err = run(m.cmd_stop, ["uuidB"])
-check("stop com PID reciclado: rc=1, nada sinalizado",
-      rc == 1 and "reciclado" in err and SINAIS == [],
+check("stop com PID reciclado: rc=0 (nao esta rodando), nada sinalizado",
+      rc == 0 and "reciclado" in err and SINAIS == [],
       "rc=%s err=%r sinais=%r" % (rc, err.strip(), SINAIS))
-check("stop reciclado: log preservado no state",
-      m.ler_state("uuidB").get("log") == logf, str(m.ler_state("uuidB")))
+check("stop reciclado: log e starttime preservados, marcado parado",
+      m.ler_state("uuidB").get("log") == logf
+      and m.ler_state("uuidB").get("starttime") == "111"
+      and m.ler_state("uuidB").get("parado") is True, str(m.ler_state("uuidB")))
 
 m.starttime = lambda pid: "111"
 m.gravar_state("uuidB", {"pid": 4242, "starttime": "111", "log": logf})
@@ -268,6 +270,14 @@ check("stop -t 1: rc=0, SIGTERM no pid gravado e marcado parado",
       rc == 0 and SINAIS == [(4242, signal.SIGTERM)]
       and m.ler_state("uuidB").get("parado") is True,
       "rc=%s sinais=%r" % (rc, SINAIS))
+check("stop preserva o starttime no state (senao mesmo_processo diz sempre sim)",
+      m.ler_state("uuidB").get("starttime") == "111", str(m.ler_state("uuidB")))
+SINAIS.clear()
+rc, _, err = run(m.cmd_stop, ["uuidB"])
+check("stop de container ja parado: rc=0 (como o docker), nada sinalizado",
+      rc == 0 and SINAIS == [], "rc=%s sinais=%r err=%r" % (rc, SINAIS, err))
+check("stop de container inexistente: rc=1",
+      run(m.cmd_stop, ["nao-existe-xyz"])[0] == 1)
 check("logs APOS stop: continua respondendo",
       "saida do container" in lout, repr(lout))
 _, lout, _ = run(m.cmd_logs, ["-n", "1", "uuidB"])
@@ -481,6 +491,150 @@ check("D-M7: rm -f mata (SIGKILL) e remove; state/log de TODOS os argumentos",
       "rc=%s ud=%r sinais=%r err=%r" % (rc, UDOCKER, SINAIS, err))
 check("rm sem argumento -> exit 2", run(m.cmd_rm, ["-f"])[0] == 2)
 
+# revisao: state parado com PID que hoje pertence a OUTRO processo (aqui o
+# proprio processo do teste, vivo de verdade) — antes o ps mostrava "Up", o rm
+# recusava e o rm -f mandava SIGKILL para ele
+novo_container("reciclado1")
+m.gravar_state("reciclado1", {"pid": os.getpid(), "log": None, "parado": True})
+_pv = m.pid_vivo
+m.pid_vivo = _pv_real = (lambda pid: pid == os.getpid())
+_, out, _ = run(m.cmd_ps, ["-a"])
+linha = [ln for ln in out.splitlines() if ln.startswith("reciclado1")]
+check("parado + pid reciclado: ps -a mostra Parado (nao Up)",
+      linha and "Parado" in linha[0] and "Up" not in linha[0], repr(linha))
+_, out, _ = run(m.cmd_ps, [])
+check("parado + pid reciclado: ps sem -a nao lista", "reciclado1" not in out, repr(out))
+SINAIS.clear()
+UDOCKER.clear()
+rc, _, err = run(m.cmd_rm, ["-f", "reciclado1"])
+check("parado + pid reciclado: rm -f nao sinaliza ninguem, so remove",
+      rc == 0 and SINAIS == [] and ["rm", "reciclado1"] in UDOCKER,
+      "rc=%s sinais=%r ud=%r" % (rc, SINAIS, UDOCKER))
+m.gravar_state("reciclado2", {"pid": os.getpid(), "parado": True})
+SINAIS.clear()
+rc, _, _ = run(m.cmd_stop, ["reciclado2"])
+check("parado + pid reciclado: segundo stop nao sinaliza, rc=0",
+      rc == 0 and SINAIS == [], "rc=%s sinais=%r" % (rc, SINAIS))
+m.apagar_state("reciclado2")
+m.pid_vivo = lambda pid: True
+
+# ps -q / -aq / flag nao suportada
+m.gravar_state("uuidB", {"pid": 4242, "starttime": "111", "log": logf})
+_, out, _ = run(m.cmd_ps, ["-q"])
+check("ps -q: so nomes, sem cabecalho", out.split() == ["uuidB"], repr(out))
+_, out, _ = run(m.cmd_ps, ["-aq"])
+check("ps -aq: todos, so nomes",
+      "uuidB" in out.split() and "uuidA" in out.split() and "STATUS" not in out,
+      repr(out))
+rc, out, err = run(m.cmd_ps, ["--format", "{{.Names}}"])
+check("ps --format: recusado com erro claro (antes ignorado)",
+      rc == 2 and "--format" in err and out == "", "rc=%s err=%r" % (rc, err))
+check("ps --filter: recusado", run(m.cmd_ps, ["--filter", "status=exited"])[0] == 2)
+
+# run -d: falha DEPOIS do create nao pode deixar container/processo orfao
+class _PopenFalso:
+    pid = 9191
+
+
+_criar, _garantir2, _qemu = m.criar_container, m.garantir_imagem, m.precisa_qemu
+m.garantir_imagem = lambda img, plat=None: True
+m.precisa_qemu = lambda c: False
+
+
+def _criar_falso(img, nome=None):
+    novo_container("uuidF")
+    return "uuidF"
+
+
+m.criar_container = _criar_falso
+try:
+    def _popen_quebra(*a, **k):
+        raise OSError("exec falhou")
+    m.subprocess.Popen = _popen_quebra
+    UDOCKER.clear()
+    try:
+        run(m.cmd_run, ["-d", "--rm", "alpine", "sleep", "9"])
+        quebrou = False
+    except OSError:
+        quebrou = True
+    check("run -d --rm: Popen falhou -> container recem-criado removido",
+          quebrou and any(c[0] == "rm" for c in UDOCKER), "ud=%r" % UDOCKER)
+
+    m.subprocess.Popen = lambda *a, **k: _PopenFalso()
+    _gravar = m.gravar_state
+
+    def _gravar_quebra(nome, dados):
+        raise OSError("disco cheio")
+    m.gravar_state = _gravar_quebra
+    m.pid_vivo = lambda pid: False
+    UDOCKER.clear()
+    SINAIS.clear()
+    try:
+        run(m.cmd_run, ["-d", "--rm", "alpine", "sleep", "9"])
+        quebrou = False
+    except OSError:
+        quebrou = True
+    m.gravar_state = _gravar
+    m.pid_vivo = lambda pid: True
+    check("run -d --rm: state nao gravou -> processo derrubado e container removido",
+          quebrou and SINAIS and SINAIS[0][0] == 9191
+          and any(c[0] == "rm" for c in UDOCKER),
+          "sinais=%r ud=%r" % (SINAIS, UDOCKER))
+finally:
+    m.subprocess.Popen = _popen_real
+    m.criar_container, m.garantir_imagem, m.precisa_qemu = _criar, _garantir2, _qemu
+
+# tabelas de flags: docker-direct x dispatcher x `docker run --help` (CLI 29.7)
+RUN_HELP_VALOR = set("""
+--add-host --annotation -a --attach --blkio-weight --blkio-weight-device
+--cap-add --cap-drop --cgroup-parent --cgroupns --cidfile --cpu-period
+--cpu-quota --cpu-rt-period --cpu-rt-runtime -c --cpu-shares --cpus
+--cpuset-cpus --cpuset-mems --detach-keys --device --device-cgroup-rule
+--device-read-bps --device-read-iops --device-write-bps --device-write-iops
+--dns --dns-option --dns-search --domainname --entrypoint -e --env --env-file
+--expose --gpus --group-add --health-cmd --health-interval --health-retries
+--health-start-interval --health-start-period --health-timeout -h --hostname
+--ip --ip6 --ipc --isolation -l --label --label-file --link --link-local-ip
+--log-driver --log-opt --mac-address -m --memory --memory-reservation
+--memory-swap --memory-swappiness --mount --name --network --network-alias
+--oom-score-adj --pid --pids-limit --platform -p --publish --pull --restart
+--runtime --security-opt --shm-size --stop-signal --stop-timeout --storage-opt
+--sysctl --tmpfs --ulimit -u --user --userns --uts -v --volume --volume-driver
+--volumes-from -w --workdir
+--cpu-count --cpu-percent --io-maxbandwidth --io-maxiops
+""".split())
+RUN_HELP_BOOL = set("""
+--detach --init --interactive --no-healthcheck --oom-kill-disable --privileged
+--publish-all --quiet --read-only --rm --sig-proxy --tty --use-api-socket
+""".split())
+check("tabela do docker-direct cobre toda flag de valor do `docker run --help`",
+      RUN_HELP_VALOR <= m.FLAGS_COM_VALOR, str(sorted(RUN_HELP_VALOR - m.FLAGS_COM_VALOR)))
+check("tabela do docker-direct cobre toda flag booleana do `docker run --help`",
+      RUN_HELP_BOOL <= m.FLAGS_SEM_VALOR, str(sorted(RUN_HELP_BOOL - m.FLAGS_SEM_VALOR)))
+check("nenhuma flag nas DUAS tabelas do docker-direct",
+      not (m.FLAGS_COM_VALOR & m.FLAGS_SEM_VALOR))
+_disp = (AQUI.parent / "scripts" / "docker").read_text(encoding="utf-8")
+_bloco = _disp.split('flags_com_valor="', 1)[1].split('"', 1)[0]
+DISPATCHER_VALOR = set(_bloco.split())
+check("dispatcher e docker-direct: MESMA lista de flags com valor",
+      DISPATCHER_VALOR == m.FLAGS_COM_VALOR,
+      "so no dispatcher: %s | so no direct: %s" % (
+          sorted(DISPATCHER_VALOR - m.FLAGS_COM_VALOR),
+          sorted(m.FLAGS_COM_VALOR - DISPATCHER_VALOR)))
+check("dispatcher: nenhuma booleana tratada como flag de valor",
+      not (DISPATCHER_VALOR & m.FLAGS_SEM_VALOR))
+_curtas = _disp.split('curtas_com_valor="', 1)[1].split('"', 1)[0]
+check("dispatcher e docker-direct: mesmas curtas com valor",
+      set(_curtas) == m.CURTAS_COM_VALOR, _curtas)
+opts, _, alvo, _ = m.parse_exec_style(["--ulimit", "nofile=1024:1024", "alpine"])
+check("--ulimit nofile=... e valor (antes: opcao desconhecida)",
+      alvo == "alpine" and opts.get("--ulimit") == "nofile=1024:1024", repr(alvo))
+
+_r = os.path.join(TMP, "raizX")
+check("resolver_no_root: `..` para no ROOT (sem symlink, roda em qualquer SO)",
+      m.resolver_no_root(_r, "a/../../../etc") == os.path.join(_r, "etc"),
+      m.resolver_no_root(_r, "a/../../../etc"))
+
 # ------------------------------------------------------------- J. fix_dns
 ctr = os.path.join(cont, "uuidA")
 os.makedirs(os.path.join(ctr, "ROOT", "etc"), exist_ok=True)
@@ -492,8 +646,8 @@ check("fix_dns: arquivo normal escrito",
 codigo_dd = DD.read_text(encoding="utf-8")
 check("fix_dns: O_NOFOLLOW presente (escrita nao segue symlink)",
       "O_NOFOLLOW" in codigo_dd and "os.open(destino" in codigo_dd)
-check("fix_dns: realpath + commonpath no ROOT/etc",
-      "commonpath" in codigo_dd and 'os.path.join(raiz, "etc")' in codigo_dd)
+check("fix_dns: ROOT/etc resolvido dentro do rootfs + commonpath",
+      "commonpath" in codigo_dd and 'resolver_no_root(raiz, "etc")' in codigo_dd)
 
 if os.name == "posix":                      # symlink exige privilegio no Windows
     alvo_fora = os.path.join(TMP, "fora.txt")
@@ -518,6 +672,45 @@ if os.name == "posix":                      # symlink exige privilegio no Window
             ok = m.fix_dns("uuidE")
         check("D-M12: ROOT/etc symlink para fora do rootfs -> recusa",
               ok is False and os.listdir(fora) == [], "ok=%s %r" % (ok, os.listdir(fora)))
+
+        # etc -> /usr/etc (absoluto, mas INTERNO): resolvido no ROOT, como chroot
+        novo_container("uuidU")
+        raizU = os.path.join(cont, "uuidU", "ROOT")
+        os.makedirs(os.path.join(raizU, "usr", "etc"))
+        os.symlink("/usr/etc", os.path.join(raizU, "etc"))
+        ok = m.fix_dns("uuidU")
+        check("fix_dns: etc -> /usr/etc resolvido dentro do ROOT (antes recusado)",
+              ok is True and "nameserver" in open(
+                  os.path.join(raizU, "usr", "etc", "resolv.conf")).read(), "ok=%s" % ok)
+
+        # etc -> ../../../<fora>: o `..` para no ROOT, nao escapa
+        novo_container("uuidV")
+        raizV = os.path.join(cont, "uuidV", "ROOT")
+        os.makedirs(raizV)
+        rel = os.path.relpath(fora, raizV)
+        os.symlink(rel, os.path.join(raizV, "etc"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            ok = m.fix_dns("uuidV")
+        check("fix_dns: etc -> ../../.. nao escapa do ROOT",
+              ok is False and os.listdir(fora) == [], "ok=%s %r" % (ok, os.listdir(fora)))
+        laco = os.path.join(raizV, "laco")
+        os.symlink("laco", laco)
+        check("resolver_no_root: loop de symlink -> None",
+              m.resolver_no_root(raizV, "laco/x") is None)
+
+        # apelido de --name pendurado (o uuid sumiu): rm limpa, nome volta a valer
+        novo_container("uuidP")
+        os.symlink(os.path.join(cont, "uuidP"), os.path.join(cont, "nomeP"))
+        os.symlink(os.path.join(cont, "uuidSumiu"), os.path.join(cont, "orfao"))
+        UDOCKER.clear()
+        run(m.cmd_rm, ["uuidP"])
+        check("rm: apaga symlink de --name pendurado",
+              not os.path.lexists(os.path.join(cont, "orfao")), str(os.listdir(cont)))
+        os.symlink(os.path.join(cont, "uuidSumiu"), os.path.join(cont, "nomeQ"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            rcq = m.conferir_nome_novo("nomeQ")
+        check("conferir_nome_novo: symlink pendurado nao conta como em uso",
+              rcq == 0 and not os.path.lexists(os.path.join(cont, "nomeQ")), "rc=%s" % rcq)
     except OSError as e:
         check("fix_dns: symlink (posix)", True, "pulado: %s" % e)
 else:
