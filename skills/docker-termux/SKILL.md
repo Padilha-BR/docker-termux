@@ -396,8 +396,8 @@ headless acima — os ~1 GB do Chromium nativo surpreendem e vale reconferir em 
 
 ## Direção do repositório (pedido do usuário)
 
-O alvo declarado: este repo ser a **descoberta de como dar ao Hermes no Android a capacidade do
-PC** — com crédito honesto e sem promessa que o aparelho não cumpre. Duas regras de conduta vêm
+O alvo declarado: este repo ser a **descoberta de como dar ao Hermes no Android a capacidade de
+uma máquina completa** — com crédito honesto e sem promessa que o aparelho não cumpre. Duas regras de conduta vêm
 disso:
 
 - **Deixe perfeitamente funcionando antes de expandir.** O usuário formula como "tá funcionando,

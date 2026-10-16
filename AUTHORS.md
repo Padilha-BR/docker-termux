@@ -8,7 +8,7 @@
 
 Responsible for the field work, for engineering the fixes and for every measurement
 published here. Everything was executed **inside the device itself**, in a terminal
-(Termux), without root and without a helper computer.
+(Termux), without root and without any second machine.
 
 If this repository saved you time, fair recognition is the citation (see
 [`CITATION.cff`](CITATION.cff)) or credit at the source.

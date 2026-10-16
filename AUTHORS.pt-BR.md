@@ -8,7 +8,7 @@
 
 Responsável pelo trabalho de campo, pela engenharia das correções e por todas as
 medições publicadas aqui. Tudo foi executado **dentro do próprio aparelho**, por
-terminal (Termux), sem root e sem computador auxiliar.
+terminal (Termux), sem root e sem nenhuma segunda máquina.
 
 Se este repositório te economizou tempo, o reconhecimento justo é a citação
 (veja `CITATION.cff`) ou o crédito na origem.
