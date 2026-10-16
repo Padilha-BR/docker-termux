@@ -27,7 +27,11 @@ PIDFILE="$STATE/udockerd.pid"
 SOCKET="${UDOCKERD_SOCKET:-$HOME/.udockerd/docker.sock}"
 PORTA="${DOCKER_DAEMON_PORT:-2375}"
 TCP="${DOCKER_DAEMON_TCP:-0}"
-LOCK="$STATE/udockerd.lock"
+LOCK="$STATE/udockerd.lock"           # diretorio (fallback sem flock)
+LOCKF="$STATE/udockerd.flock"         # arquivo do flock
+# A secao critica pode passar de 30 s (ping 2 s + espera de um pid antigo 10 s
+# + daemon TCP legado ~4 s + 15 s de subida): quem espera o lock espera mais.
+ESPERA_LOCK="${DOCKER_DAEMON_LOCK_ESPERA:-90}"
 # nameservers dos containers do daemon (mesma variavel do docker-direct)
 DNS_ARGS=()
 for n in $(printf '%s' "${DOCKER_TERMUX_DNS:-8.8.8.8,8.8.4.4}" | tr ',' ' '); do
@@ -69,24 +73,78 @@ pid_do_daemon() {
 }
 
 # LOCK: duas chamadas `docker ...` ao mesmo tempo subiam DOIS udockerd e o
-# pidfile ficava com o que morreu no bind. mkdir e atomico; quem nao pega o
-# lock espera o outro terminar (e normalmente sai no `responde`).
+# pidfile ficava com o que morreu no bind. Quem nao pega o lock espera o outro
+# terminar (e normalmente sai no `responde`).
+#
+# Com `flock` o kernel solta o lock quando o dono morre — nada a adivinhar. Sem
+# ele (Termux sem util-linux), mkdir atomico + arquivo "pid starttime":
+#   - dono so conta se o pid vive E o starttime bate (PID reciclado apos reboot
+#     nao segura o lock);
+#   - lock SEM dono (morte entre o mkdir e a gravacao) e velho depois de 60 s;
+#   - a limpeza e `mv` atomico para um nome unico e so depois `rm`, conferindo
+#     que o movido era mesmo o lock velho visto (senao devolve).
+dono_vivo() {   # $1 = "pid starttime"
+    local pid st atual
+    read -r pid st <<<"$1"
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    atual=$(starttime_de "$pid") || return 1
+    [ -z "$st" ] || [ "$st" = "$atual" ]
+}
+
+VISTO=""
+lock_abandonado() {
+    local idade mt
+    VISTO=$(cat "$LOCK/dono" 2>/dev/null || true)
+    if [ -n "$VISTO" ]; then
+        ! dono_vivo "$VISTO"
+        return
+    fi
+    mt=$(stat -c %Y "$LOCK" 2>/dev/null) || return 1    # sumiu: tenta o mkdir
+    idade=$(( $(date +%s) - mt ))
+    [ "$idade" -gt 60 ]
+}
+
+soltar_lock() {
+    local meu velho
+    meu=$(cat "$LOCK/dono" 2>/dev/null || true)
+    [ "${meu%% *}" = "$$" ] || return 0          # nao e mais nosso: nao mexe
+    velho="$LOCK.solto.$$"
+    mv "$LOCK" "$velho" 2>/dev/null && rm -rf "$velho"
+}
+
 pegar_lock() {
-    local dono
-    for _ in $(seq 1 60); do
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>>"$LOCKF"
+        flock -w "$ESPERA_LOCK" 9 && return 0
+        echo "erro: outro docker-daemon-up segura $LOCKF ha ${ESPERA_LOCK} s" >&2
+        return 1
+    fi
+    local fim velho
+    fim=$(( $(date +%s) + ESPERA_LOCK ))
+    while [ "$(date +%s)" -lt "$fim" ]; do
         if mkdir "$LOCK" 2>/dev/null; then
-            echo $$ > "$LOCK/pid"
-            trap 'rm -rf "$LOCK"' EXIT
+            printf '%s %s\n' "$$" "$(starttime_de $$ || true)" > "$LOCK/dono.tmp" \
+                && mv -f "$LOCK/dono.tmp" "$LOCK/dono"
+            trap soltar_lock EXIT
             return 0
         fi
-        dono=$(cat "$LOCK/pid" 2>/dev/null || echo "")
-        if [ -n "$dono" ] && ! kill -0 "$dono" 2>/dev/null; then
-            rm -rf "$LOCK"          # dono morreu sem soltar: lock velho
+        if lock_abandonado; then
+            velho="$LOCK.velho.$$"
+            if mv "$LOCK" "$velho" 2>/dev/null; then
+                if [ "$(cat "$velho/dono" 2>/dev/null || true)" = "$VISTO" ]; then
+                    rm -rf "$velho"
+                else
+                    # entre a checagem e o mv outro processo limpou e criou um
+                    # lock NOVO: devolve (se o lugar ainda estiver vago)
+                    [ -e "$LOCK" ] || mv "$velho" "$LOCK" 2>/dev/null || rm -rf "$velho"
+                fi
+            fi
             continue
         fi
         sleep 0.5
     done
-    echo "erro: outro docker-daemon-up segura $LOCK ha 30 s" >&2
+    echo "erro: outro docker-daemon-up segura $LOCK ha ${ESPERA_LOCK} s" >&2
     return 1
 }
 
@@ -157,16 +215,18 @@ time.sleep(2)
 PY
 fi
 
-termux-wake-lock 2>/dev/null || true
+termux-wake-lock 2>/dev/null 9>&- || true
 
 if [ "$TCP" = 1 ]; then
+    # 9>&-: o daemon desgarrado nao herda o fd do flock (seguraria o lock
+    # enquanto vivesse)
     setsid "$UDOCKERD" --host 127.0.0.1 --port "$PORTA" \
         --data-dir "$HOME/.udocker" "${DNS_ARGS[@]}" \
-        >>"$LOG" 2>&1 < /dev/null &
+        >>"$LOG" 2>&1 < /dev/null 9>&- &
 else
     setsid "$VENV/bin/python" "$UDOCKERD_UNIX" --socket "$SOCKET" \
         --data-dir "$HOME/.udocker" "${DNS_ARGS[@]}" \
-        >>"$LOG" 2>&1 < /dev/null &
+        >>"$LOG" 2>&1 < /dev/null 9>&- &
 fi
 novo=$!
 # grava atomico: "pid starttime"
