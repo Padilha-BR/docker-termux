@@ -4,16 +4,26 @@
 Uso:
     md2pdf ENTRADA.md [-o SAIDA.pdf] [--titulo T] [--subtitulo S] [--autor A]
             [--paper a4|letter] [--margem CM] [--fonte NOME] [--numerar-paginas]
+            [--permitir-rede]
 
 ENTRADA pode ser `-` para ler da entrada padrao.
 Sai com codigo 0 e imprime o caminho do PDF, ou com 2 e uma mensagem clara.
+
+Recursos externos (imagem, CSS) do Markdown/HTML: so `data:` e arquivos DENTRO
+da pasta da entrada (caminho relativo funciona: ![](fig.png)). `file:///` fora
+dela e http(s) sao recusados — o Markdown pode vir de fonte nao confiavel e o
+weasyprint buscaria /etc/passwd ou uma URL interna. --permitir-rede libera
+http(s).
 """
 from __future__ import annotations
 
 import argparse
 import html
 import os
+import re
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import markdown
@@ -97,6 +107,47 @@ def ler_entrada(caminho: str) -> str:
         erro(f"nao consegui ler {caminho}: {e}")
 
 
+def fetcher_restrito(raiz: str, rede: bool):
+    """url_fetcher do weasyprint que so busca data:, arquivo sob `raiz` e
+    (com --permitir-rede) http(s). Funciona com o weasyprint >= 68 (classe
+    URLFetcher) e com os antigos (funcao default_url_fetcher) — a imagem
+    pdf-tool:1 ja construida pode ter qualquer um, porque este script e montado
+    do celular sem rebuild.
+    """
+    raiz = os.path.realpath(raiz)
+    permitidos = {"data", "file"} | ({"http", "https"} if rede else set())
+
+    def conferir(url: str) -> None:
+        esquema = urllib.parse.urlsplit(url).scheme.lower()
+        if esquema not in permitidos:
+            raise ValueError(f"recurso bloqueado ({esquema}): {url} "
+                             "(use --permitir-rede para http/https)")
+        if esquema == "file":
+            caminho = os.path.realpath(
+                urllib.request.url2pathname(urllib.parse.urlsplit(url).path))
+            if os.path.commonpath([raiz, caminho]) != raiz:
+                raise ValueError(f"arquivo fora da pasta da entrada bloqueado: {caminho}")
+
+    try:
+        from weasyprint.urls import URLFetcher
+    except ImportError:
+        URLFetcher = None
+
+    if URLFetcher is not None:
+        class Restrito(URLFetcher):
+            def fetch(self, url, headers=None):
+                conferir(url)
+                return super().fetch(url, headers)
+        return Restrito()
+
+    from weasyprint import default_url_fetcher
+
+    def restrito(url, *args, **kwargs):
+        conferir(url)
+        return default_url_fetcher(url, *args, **kwargs)
+    return restrito
+
+
 def converter(texto: str) -> str:
     md = markdown.Markdown(extensions=[
         "extra", "tables", "fenced_code", "codehilite", "sane_lists",
@@ -120,11 +171,17 @@ def main() -> int:
     ap.add_argument("--numerar-paginas", action="store_true")
     ap.add_argument("--html", action="store_true",
                     help="trata a entrada como HTML puro, nao Markdown")
+    ap.add_argument("--permitir-rede", action="store_true",
+                    help="deixa o render buscar imagem/CSS por http(s)")
     args = ap.parse_args()
 
     if not args.entrada:
         ap.print_help()
         return 2
+    # o nome da fonte vai cru para dentro do CSS: aspas/chaves/; quebrariam
+    # (ou injetariam) regras. Nome de fonte de verdade cabe nesta classe.
+    if not re.fullmatch(r"[A-Za-z0-9 _.\-]{1,64}", args.fonte):
+        erro(f"--fonte invalida: {args.fonte!r} (use letras, numeros, espaco, _ . -)")
 
     texto = ler_entrada(args.entrada)
     if not texto.strip():
@@ -177,8 +234,12 @@ def main() -> int:
     except Exception as e:  # pragma: no cover
         erro(f"weasyprint indisponivel na imagem: {e}")
 
+    pasta_entrada = (Path(args.entrada).resolve().parent if args.entrada != "-"
+                     else Path.cwd())
     try:
-        HTML(string=doc).write_pdf(str(destino))
+        HTML(string=doc, base_url=pasta_entrada.as_uri() + "/",
+             url_fetcher=fetcher_restrito(str(pasta_entrada), args.permitir_rede)
+             ).write_pdf(str(destino))
     except Exception as e:
         erro(f"falha ao renderizar o PDF: {e}", 1)
 

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
+import tempfile
 from typing import Iterator
 
 from selenium import webdriver
@@ -46,17 +48,29 @@ FLAGS_BASE = [
 
 def abrir(headless: bool = True, largura: int = 900, altura: int = 1200,
           perfil: str | None = None) -> webdriver.Chrome:
-    """Devolve um Chrome ja configurado para o Android. Feche com d.quit()."""
+    """Devolve um Chrome ja configurado para o Android. Feche com d.quit().
+
+    Sem `perfil`, cada chamada usa um perfil TEMPORARIO (o fixo
+    `webauto-perfil` vazava cookie/login entre scripts e travava duas sessoes
+    em paralelo). Para manter login entre execucoes, passe perfil=... de
+    proposito. O temporario fica em d.perfil_temporario (sessao() apaga).
+    """
+    temporario = None
+    if perfil is None:
+        os.makedirs(TMPDIR, exist_ok=True)
+        perfil = temporario = tempfile.mkdtemp(prefix="webauto-perfil-", dir=TMPDIR)
     opts = Options()
     opts.binary_location = CHROME
     if headless:
         opts.add_argument("--headless=new")
     opts.add_argument(f"--window-size={largura},{altura}")
-    opts.add_argument(f"--user-data-dir={perfil or os.path.join(TMPDIR, 'webauto-perfil')}")
+    opts.add_argument(f"--user-data-dir={perfil}")
     for flag in FLAGS_BASE:
         opts.add_argument(flag)
-    return webdriver.Chrome(service=Service(executable_path=CHROMEDRIVER),
-                            options=opts)
+    d = webdriver.Chrome(service=Service(executable_path=CHROMEDRIVER),
+                         options=opts)
+    d.perfil_temporario = temporario
+    return d
 
 
 @contextlib.contextmanager
@@ -68,6 +82,22 @@ def sessao(**kwargs) -> Iterator[webdriver.Chrome]:
     finally:
         with contextlib.suppress(Exception):
             d.quit()
+        if getattr(d, "perfil_temporario", None):
+            shutil.rmtree(d.perfil_temporario, ignore_errors=True)
+
+
+def literal_xpath(texto: str) -> str:
+    """Texto -> literal XPath 1.0 valido, mesmo misturando ' e ".
+
+    O `repr()` do Python gerava '...\'...' quando havia os dois tipos de
+    aspa, e isso nao e XPath valido. Com os dois, usa concat().
+    """
+    if "'" not in texto:
+        return f"'{texto}'"
+    if '"' not in texto:
+        return f'"{texto}"'
+    partes = texto.split("'")
+    return "concat(" + ", \"'\", ".join(f"'{p}'" for p in partes) + ")"
 
 
 def esperar(driver: webdriver.Chrome, seletor: str, timeout: float = 10,
@@ -77,7 +107,7 @@ def esperar(driver: webdriver.Chrome, seletor: str, timeout: float = 10,
             "texto": By.XPATH, "tag": By.TAG_NAME}
     if por == "texto":
         cond = EC.presence_of_element_located(
-            (By.XPATH, f"//*[contains(text(), {seletor!r})]"))
+            (By.XPATH, f"//*[contains(text(), {literal_xpath(seletor)})]"))
     else:
         cond = EC.presence_of_element_located((mapa[por], seletor))
     return WebDriverWait(driver, timeout).until(cond)
